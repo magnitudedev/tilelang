@@ -279,17 +279,19 @@ class _TensorContract:
         )
 
     def check(self, value: Any) -> None:
+        # Hot path: several hundred launches per model step. Cheap attribute
+        # reads and identity comparisons first; messages are built only on failure.
         if not isinstance(value, torch.Tensor):
             raise TypeError(f"argument {self.index} must be a tensor, got {type(value).__name__}")
-        if value.device.type != "mps":
+        if not value.is_mps:
             raise ValueError(f"argument {self.index} must be on the mps device, got {value.device}")
-        if value.dtype != self.dtype:
+        if value.dtype is not self.dtype:
             raise TypeError(f"argument {self.index} has dtype {value.dtype}, expected {self.dtype}")
         if not value.is_contiguous():
             raise ValueError(f"argument {self.index} must be contiguous")
         shape = value.shape
         if self.shape is not None:
-            if tuple(shape) != self.shape:
+            if shape != self.shape:
                 raise ValueError(f"argument {self.index} has shape {tuple(shape)}, expected {self.described}")
             return
         if len(shape) != self.rank or any(shape[axis] != dim for axis, dim in self.static_dims):
