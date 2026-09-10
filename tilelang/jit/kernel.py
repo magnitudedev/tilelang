@@ -163,9 +163,13 @@ class JITKernel(Generic[_P, _T]):
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
         backend_context: BackendContext | None = None,
+        adapter_metadata: dict[str, Any] | None = None,
     ):
         """
         Alternative constructor to create a TorchFunction directly from a database.
+
+        ``adapter_metadata`` carries backend-specific launch information for
+        adapters that relaunch from cached source instead of a library.
         """
         instance = cls(
             func=func,
@@ -189,6 +193,7 @@ class JITKernel(Generic[_P, _T]):
             kernel_lib_path=kernel_lib_path,
             pass_configs=pass_configs,
             compile_flags=compile_flags,
+            adapter_metadata=adapter_metadata,
         )
         instance.torch_function = instance.adapter.func
         return instance
@@ -413,6 +418,7 @@ class JITKernel(Generic[_P, _T]):
         kernel_lib_path: str,
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
+        adapter_metadata: dict[str, Any] | None = None,
     ) -> BaseKernelAdapter:
         target = self.target
         execution_backend = self.execution_backend
@@ -467,6 +473,18 @@ class JITKernel(Generic[_P, _T]):
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
             )
+        elif execution_backend == "torch":
+            assert is_metal_target(target)
+            if adapter_metadata is None:
+                raise ValueError("cached Metal kernels require their launch metadata")
+            adapter = MetalKernelAdapter.from_database(
+                params=params,
+                result_idx=result_idx,
+                func_or_mod=func_or_mod,
+                device_kernel_source=device_kernel_source,
+                launch_metadata=adapter_metadata,
+                verbose=self.verbose,
+            )
         else:
             # Handle invalid backend.
             raise ValueError(f"Invalid execution backend: {execution_backend}")
@@ -519,7 +537,10 @@ class JITKernel(Generic[_P, _T]):
         """
         if self.execution_backend in {"cython", "nvrtc", "tvm_ffi", "cutedsl"}:
             return self.adapter.get_kernel_source(kernel_only=kernel_only)
-        return self.artifact.kernel_source
+        if self.artifact is not None:
+            return self.artifact.kernel_source
+        # Loaded from the kernel cache: the adapter holds the full module source.
+        return self.adapter.get_kernel_source(kernel_only=False)
 
     def get_host_source(self) -> str:
         """
