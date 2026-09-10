@@ -10,6 +10,8 @@ the kernel's argument struct exactly as the Metal code generator lays it out.
 
 The user-facing call keeps the declared parameter order; parameters listed in
 ``out_idx`` are allocated by the adapter and returned, as with other backends.
+The launch plan is plain data, so a cached kernel is recreated from its Metal
+source and launch metadata without lowering again.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from tvm import tirx
 from tilelang import tvm as tvm
 from tilelang.engine.param import KernelParam
 
-from ..base import BaseKernelAdapter
+from ..base import BaseKernelAdapter, CachedTextSource
 
 _CALL_PACKED = "tirx.tvm_call_packed"
 _STRUCT_GET = "tirx.tvm_struct_get"
@@ -78,6 +80,29 @@ class MetalLaunch:
     @property
     def threads(self) -> tuple[int, int, int]:
         return tuple(g * b for g, b in zip(self.grid, self.block))
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "buffers": list(self.buffers),
+            "scalars": list(self.scalars),
+            "grid": list(self.grid),
+            "block": list(self.block),
+        }
+
+    @classmethod
+    def from_metadata(cls, metadata: dict[str, Any]) -> MetalLaunch:
+        try:
+            symbol = metadata["symbol"]
+            buffers = tuple(int(index) for index in metadata["buffers"])
+            scalars = tuple(int(index) for index in metadata["scalars"])
+            grid = tuple(int(extent) for extent in metadata["grid"])
+            block = tuple(int(extent) for extent in metadata["block"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"invalid Metal launch metadata: {metadata!r}") from error
+        if not isinstance(symbol, str) or len(grid) != 3 or len(block) != 3:
+            raise ValueError(f"invalid Metal launch metadata: {metadata!r}")
+        return cls(symbol=symbol, buffers=buffers, scalars=scalars, grid=grid, block=block)
 
 
 def _is_call_to(expr: Any, op_name: str) -> bool:
@@ -302,6 +327,39 @@ class MetalKernelAdapter(BaseKernelAdapter):
 
     _shader_library: Any = None
     _shader_kernels: dict[str, Any] | None = None
+
+    @classmethod
+    def from_database(
+        cls,
+        params: list[KernelParam],
+        result_idx: list[int],
+        func_or_mod: tirx.PrimFunc | tvm.IRModule,
+        device_kernel_source: CachedTextSource,
+        launch_metadata: dict[str, Any],
+        verbose: bool = False,
+    ):
+        """Recreate the adapter from cached Metal source and its launch metadata."""
+        adapter = cls.__new__(cls)
+        adapter._set_cached_text_source("kernel_global_source", "_kernel_global_source_path", device_kernel_source)
+        source = adapter._load_cached_text_source("kernel_global_source", "_kernel_global_source_path")
+        if source is None:
+            raise ValueError("cached Metal kernel source is unavailable")
+        adapter.kernel_global_source = source
+        adapter.verbose = verbose
+        try:
+            launches = tuple(MetalLaunch.from_metadata(item) for item in launch_metadata["launches"])
+        except (KeyError, TypeError) as error:
+            raise ValueError(f"invalid Metal launch metadata: {launch_metadata!r}") from error
+        if not launches:
+            raise ValueError("Metal launch metadata describes no kernel launch")
+        adapter.launches = launches
+        BaseKernelAdapter.__init__(adapter, func_or_mod, params=params, result_idx=result_idx)
+        return adapter
+
+    @property
+    def launch_metadata(self) -> dict[str, Any]:
+        """Plain data needed to relaunch the cached Metal source."""
+        return {"launches": [launch.to_metadata() for launch in self.launches]}
 
     @property
     def thread_execution_width(self) -> int:
