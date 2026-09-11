@@ -70,6 +70,8 @@ private:
   bool TryPrintSimdgroupIndexExpr(const CallNode *op, std::ostream &os);
   void PrintSimdgroupIndexExpr(int64_t group_mask, int64_t group_shift,
                                std::ostream &os) const;
+  void PrintFastMath(const char *function, const CallNode *op,
+                     std::ostream &os);
   void EnsureFragmentLaneVars();
   void EnsureCooperativeTensorBuffer(const Var &var);
 

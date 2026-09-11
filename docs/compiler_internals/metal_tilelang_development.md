@@ -467,6 +467,7 @@ descriptor shape described in Section 1.3.
 | simdgroup GEMM | Implemented | Compatibility path, Section 3.2 |
 | simdgroup id / lane id lowering | Implemented | Also used by cooperative tensor kernels |
 | `const` / `__restrict` parameter emission | Implemented | Improves MSL alias information |
+| Fast-math intrinsics | Implemented | `T.__exp/__exp10/__log/__log2/__log10/__tan/__cos/__sin` lower to `metal::fast::*` for float and half; plain `T.exp` and relatives keep the shader compiler's math mode |
 
 ### 5.5 Known Limitations and Roadmap
 

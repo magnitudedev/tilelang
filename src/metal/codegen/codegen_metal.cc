@@ -1313,6 +1313,22 @@ bool CodeGenTileLangMetal::TryPrintSimdgroupIndexExpr(const CallNode *op,
   return true;
 }
 
+void CodeGenTileLangMetal::PrintFastMath(const char *function,
+                                         const CallNode *op, std::ostream &os) {
+  // tl.__exp and relatives request the target's approximate implementation.
+  // MSL's metal::fast namespace provides them for float and half; plain calls
+  // keep whatever precision the shader compiler's math mode selects.
+  TVM_FFI_ICHECK_EQ(op->args.size(), 1U);
+  DataType dtype = op->dtype;
+  TVM_FFI_ICHECK(dtype.is_scalar() && dtype.is_float() &&
+                 (dtype.bits() == 32 || dtype.bits() == 16))
+      << "Metal fast-math " << function
+      << " takes one scalar float or half value, got " << dtype;
+  os << "metal::fast::" << function << "(";
+  this->PrintExpr(op->args[0], os);
+  os << ")";
+}
+
 void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
                                       std::ostream &os) { // NOLINT(*)
   TVM_FFI_ICHECK(!op->op.as<GlobalVarNode>())
@@ -1336,7 +1352,23 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
         << "Only 8x8 matrix is supported, but got " << col_val << "x"
         << row_val;
   };
-  if (op->op.same_as(builtin::make_filled_simdgroup_matrix())) {
+  if (op->op.same_as(tl::__exp())) {
+    PrintFastMath("exp", op, os);
+  } else if (op->op.same_as(tl::__exp10())) {
+    PrintFastMath("exp10", op, os);
+  } else if (op->op.same_as(tl::__log())) {
+    PrintFastMath("log", op, os);
+  } else if (op->op.same_as(tl::__log2())) {
+    PrintFastMath("log2", op, os);
+  } else if (op->op.same_as(tl::__log10())) {
+    PrintFastMath("log10", op, os);
+  } else if (op->op.same_as(tl::__tan())) {
+    PrintFastMath("tan", op, os);
+  } else if (op->op.same_as(tl::__cos())) {
+    PrintFastMath("cos", op, os);
+  } else if (op->op.same_as(tl::__sin())) {
+    PrintFastMath("sin", op, os);
+  } else if (op->op.same_as(builtin::make_filled_simdgroup_matrix())) {
     TVM_FFI_ICHECK_EQ(op->args.size(), 5);
     Var var = Downcast<Var>(op->args[0]);
     // Get the data type of the simdgroup matrix
