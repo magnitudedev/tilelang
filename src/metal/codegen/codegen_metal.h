@@ -72,6 +72,8 @@ private:
                                std::ostream &os) const;
   void PrintSimdgroupReduce(const char *function, bool integer_only,
                             const CallNode *op, std::ostream &os);
+  void PrintFastMath(const char *function, const CallNode *op,
+                     std::ostream &os);
   void PrintSimdgroupElement(const Buffer &buffer, PrimExpr index, int lane,
                              std::ostream &os);
   void EnsureFragmentLaneVars();

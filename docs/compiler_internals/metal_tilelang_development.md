@@ -474,6 +474,7 @@ descriptor shape described in Section 1.3.
 | Torch adapter argument binding | Implemented | Launch plan from host call sites: MSL slots bound by packed-ABI slot, scalars packed into the kernel argument struct, kernels launched in program order |
 | Torch backend kernel cache | Implemented | Entries hold the Metal source, kernel parameters, and launch metadata; reloads recreate the adapter without lowering |
 | Scalar warp reductions | Implemented | `T.warp_reduce_sum/max/min/bitand/bitor` lower to `simd_sum/max/min/and/or`; per SIMD group, for float, half and integer scalars up to 32 bits |
+| Fast-math intrinsics | Implemented | `T.__exp/__exp10/__log/__log2/__log10/__tan/__cos/__sin` lower to `metal::fast::*` for float and half; plain `T.exp` and relatives keep the shader compiler's math mode |
 
 ### 5.5 Known Limitations and Roadmap
 

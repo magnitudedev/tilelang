@@ -49,23 +49,8 @@ static constexpr const char *kEnableLowerLDGSTG = "tl.enable_lower_ldgstg";
 static constexpr const char *kEnableLowerLDGSTGPredicated =
     "tl.enable_lower_ldgstg_predicated";
 
-// fast math related op
-// __exp(x) - fast exponential
-TVM_DLL const Op &__exp();
-// __exp10(x) - fast base-10 exponential
-TVM_DLL const Op &__exp10();
-// __log(x) - fast natural logarithm
-TVM_DLL const Op &__log();
-// __log2(x) - fast base-2 logarithm
-TVM_DLL const Op &__log2();
-// __log10(x) - fast base-10 logarithm
-TVM_DLL const Op &__log10();
-// __tan(x) - fast tangent
-TVM_DLL const Op &__tan();
-// __cos(x) - fast cosine
-TVM_DLL const Op &__cos();
-// __sin(x) - fast sine
-TVM_DLL const Op &__sin();
+// fast math related op; the transcendental __exp/__log/... family is declared
+// in the common op/builtin.h and lowered per target.
 // fast_rcp(x) - approximate reciprocal
 TVM_DLL const Op &fast_rcp();
 // max_nan(x, y) - max with CUDA __hmax_nan semantics for fp16/bf16

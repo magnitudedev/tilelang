@@ -569,6 +569,22 @@ TVM_DLL const Op &warp_reduce_bitand();
 TVM_DLL const Op &warp_reduce_bitor();
 
 /*!
+ * \brief Fast-math transcendental intrinsics.
+ *
+ *  Each computes the same function as its plain TIR counterpart (exp, exp10,
+ *  log, log2, log10, tan, cos, sin) with the target's approximate, faster
+ *  implementation. Accuracy is target-defined; plain ops stay precise.
+ */
+TVM_DLL const Op &__exp();
+TVM_DLL const Op &__exp10();
+TVM_DLL const Op &__log();
+TVM_DLL const Op &__log2();
+TVM_DLL const Op &__log10();
+TVM_DLL const Op &__tan();
+TVM_DLL const Op &__cos();
+TVM_DLL const Op &__sin();
+
+/*!
  * \brief tilelang intrinsic for CUDA/HIP read-only cache load (__ldg).
  *
  *  This op allows users to explicitly request a non-coherent cached load
