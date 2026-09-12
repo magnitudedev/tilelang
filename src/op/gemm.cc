@@ -77,7 +77,12 @@ void RegisterGemmImpl(GemmImpl impl) {
  *      stride_A (Int), stride_B (Int), offset_A (PrimExpr),
  *      offset_B (PrimExpr),
  *      (optional) kPack (Int), (optional) internal wg_wait (Int),
- *      (optional) mbar (BufferLoad), cCoord_y (PrimExpr), cCoord_x (PrimExpr)]
+ *      (optional) mbar (BufferLoad), cCoord_y (PrimExpr), cCoord_x (PrimExpr),
+ *      (optional, non-blockscaled) valid_m (PrimExpr)]
+ *
+ * Block-scaled calls retain their existing scale regions at positions 19-21
+ * and may append valid_m at position 22. This keeps every historic position
+ * stable for out-of-tree consumers.
  */
 Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmNode> node = make_object<GemmNode>();
@@ -101,6 +106,7 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->k_ = args[7].as<IntImm>().value()->value;
   node->policy_ = GemmWarpPolicy(args[8].as<IntImm>().value()->value);
   node->clearAccum_ = args[9].as<PrimExpr>().value();
+  node->validM_ = IntImm(DataType::Int(32), node->m_);
   node->strideA_ = args[10].as<IntImm>().value()->value;
   node->strideB_ = args[11].as<IntImm>().value()->value;
   node->offsetA_ = args[12].as<PrimExpr>().value();
@@ -129,14 +135,17 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
-  if (args.size() > 19) {
-    node->sfaRegion_ = NormalizeToBufferRegion(args[19]);
-  }
-  if (args.size() > 20) {
-    node->sfbRegion_ = NormalizeToBufferRegion(args[20]);
+  if (args.size() == 20) {
+    node->validM_ = args[19].as<PrimExpr>().value();
   }
   if (args.size() > 21) {
+    // Existing block-scaled call protocol.
+    node->sfaRegion_ = NormalizeToBufferRegion(args[19]);
+    node->sfbRegion_ = NormalizeToBufferRegion(args[20]);
     node->sfKStart_ = args[21].as<PrimExpr>().value();
+  }
+  if (args.size() > 22) {
+    node->validM_ = args[22].as<PrimExpr>().value();
   }
   node->annotations_ = annotations;
   data_ = std::move(node);

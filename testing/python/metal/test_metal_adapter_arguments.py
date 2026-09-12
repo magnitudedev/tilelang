@@ -221,6 +221,35 @@ def test_dynamic_shape_signature_is_rejected_clearly():
         compile_metal(dynamic)
 
 
+def test_threadgroup_atomic_add_returns_previous_value():
+    @T.prim_func
+    def histogram(
+        Indices: T.Tensor((64,), "int32"),
+        Counts: T.Tensor((4,), "int32"),
+        Positions: T.Tensor((64,), "int32"),
+    ):
+        with T.Kernel(1, threads=64):
+            lane = T.get_thread_binding(0)
+            shared = T.alloc_shared((4,), "int32")
+            if lane < 4:
+                shared[lane] = 0
+            T.sync_threads()
+            bucket = Indices[lane]
+            Positions[lane] = T.atomic_add(shared[bucket], 1, return_prev=True)
+            T.sync_threads()
+            if lane < 4:
+                Counts[lane] = shared[lane]
+
+    indices = torch.arange(64, dtype=torch.int32, device="mps") % 4
+    counts = torch.empty(4, dtype=torch.int32, device="mps")
+    positions = torch.empty(64, dtype=torch.int32, device="mps")
+    kernel = compile_metal(histogram)
+    kernel(indices, counts, positions)
+    torch.mps.synchronize()
+    torch.testing.assert_close(counts.cpu(), torch.full((4,), 16, dtype=torch.int32))
+    assert sorted(positions.cpu().tolist()) == sorted(list(range(16)) * 4)
+
+
 def test_launch_plan_is_plain_data():
     launch = compile_metal(affine(64)).adapter.launches[0]
     assert launch == MetalLaunch(symbol="main_kernel", buffers=(1, 0), scalars=(), grid=(1, 1, 1), block=(64, 1, 1))

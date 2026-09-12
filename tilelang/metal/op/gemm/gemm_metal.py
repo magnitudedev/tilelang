@@ -15,6 +15,7 @@ from tilelang.utils.language import (
     is_global,
     is_shared,
 )
+from tvm import arith
 from tvm import tirx as tir
 from tvm.ir import Range
 from tvm.target import Target
@@ -22,6 +23,18 @@ from tvm.target import Target
 
 GEMM_INST_METAL = "metal.simdgroup"
 GEMM_INST_METAL_COOPERATIVE_TENSOR = "metal.cooperative_tensor"
+
+
+def _partial_m_extent(gemm: GemmBase):
+    """Return a runtime M bound, or None for the ordinary full-tile path."""
+    valid_m = gemm.valid_m
+    if arith.Analyzer().can_prove_equal(valid_m, gemm.M):
+        return None
+    if isinstance(valid_m, tir.IntImm):
+        extent = int(valid_m)
+        if not 0 <= extent <= int(gemm.M):
+            raise ValueError(f"Metal T.gemm valid_m must be in [0, {gemm.M}], got {extent}")
+    return valid_m
 
 
 def _make_padded_layout(buffer):
@@ -36,6 +49,7 @@ def _make_padded_layout(buffer):
 
 
 class GemmMetalSimdGroup(GemmBase):
+    supports_runtime_valid_m = True
     def is_gemm_ss(self) -> bool:
         return is_shared(self.A) and is_shared(self.B)
 
@@ -114,6 +128,12 @@ class GemmMetalSimdGroup(GemmBase):
         num_simd_c = warp_rows * warp_cols
         block_K = mps_emitter.chunk
         micro_size_k = mps_emitter.micro_size_k
+        micro_size_x = mps_emitter.micro_size_x
+        valid_m = _partial_m_extent(self)
+        full_m = self.M
+        warp_m, _ = mps_emitter._get_warp_indices()
+        warp_start_m = warp_m * warp_row_tiles
+        warp_end_m = warp_start_m + warp_row_tiles
 
         A_region = self.ARegion
         B_region = self.BRegion
@@ -134,17 +154,18 @@ class GemmMetalSimdGroup(GemmBase):
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
         @T.macro
-        def multiply(A_local, B_local, C_local):
+        def multiply(A_local, B_local, C_local, bound):
             for ki in T.serial(block_K // micro_size_k):
                 if not a_in_fragment:
-                    mps_emitter.ldmatrix_a(A_local, A_region, ki)
+                    mps_emitter.ldmatrix_a(A_local, A_region, ki, valid_m=bound)
                 if not b_in_fragment:
-                    mps_emitter.ldmatrix_b(B_local, B_region, ki)
+                    mps_emitter.ldmatrix_b(B_local, B_region, ki, valid_m=bound)
                 mps_emitter.mma(
                     A_region.buffer if a_in_fragment else A_local,
                     B_region.buffer if b_in_fragment else B_local,
                     C_local,
                     ki,
+                    bound,
                 )
 
         if c_in_register:
@@ -153,10 +174,21 @@ class GemmMetalSimdGroup(GemmBase):
             def _gemm_ss_simdgroup() -> None:
                 A_local = T.alloc_local((warp_rows * 64), a_dtype, scope="metal.simdgroup")
                 B_local = T.alloc_local((warp_cols * 64), b_dtype, scope="metal.simdgroup")
-                if clear_accum:
-                    for _i in T.serial(num_simd_c):
-                        T.make_filled_simdgroup_matrix(C_buf.data, _i, T.cast(0, accum_dtype))
-                multiply(A_local, B_local, C_buf)
+                if valid_m is not None and valid_m == full_m:
+                    if clear_accum:
+                        for _i in T.serial(num_simd_c):
+                            T.make_filled_simdgroup_matrix(C_buf.data, _i, T.cast(0, accum_dtype))
+                    multiply(A_local, B_local, C_buf, None)
+                else:
+                    if valid_m is None or warp_start_m < valid_m:
+                        if clear_accum:
+                            for _i in T.serial(num_simd_c):
+                                if valid_m is None or warp_start_m + (_i // warp_cols) * micro_size_x < valid_m:
+                                    T.make_filled_simdgroup_matrix(C_buf.data, _i, T.cast(0, accum_dtype))
+                        if valid_m is None or warp_end_m <= valid_m:
+                            multiply(A_local, B_local, C_buf, None)
+                        else:
+                            multiply(A_local, B_local, C_buf, valid_m)
 
             return _Simplify(_gemm_ss_simdgroup, inline_let=True)
 
@@ -165,18 +197,33 @@ class GemmMetalSimdGroup(GemmBase):
             A_local = T.alloc_local((warp_rows * 64), a_dtype, scope="metal.simdgroup")
             B_local = T.alloc_local((warp_cols * 64), b_dtype, scope="metal.simdgroup")
             C_simd = T.alloc_local((num_simd_c * 64), accum_dtype, scope="metal.simdgroup")
-            if clear_accum:
-                for _i in T.serial(num_simd_c):
-                    T.make_filled_simdgroup_matrix(C_simd.data, _i, T.cast(0, accum_dtype))
+            if valid_m is not None and valid_m == full_m:
+                if clear_accum:
+                    for _i in T.serial(num_simd_c):
+                        T.make_filled_simdgroup_matrix(C_simd.data, _i, T.cast(0, accum_dtype))
+                else:
+                    mps_emitter.simd_load(C_simd, C_buf)
+                multiply(A_local, B_local, C_simd, None)
+                mps_emitter.simd_store(C_simd, C_buf)
             else:
-                mps_emitter.simd_load(C_simd, C_buf)
-            multiply(A_local, B_local, C_simd)
-            mps_emitter.simd_store(C_simd, C_buf)
+                if valid_m is None or warp_start_m < valid_m:
+                    if clear_accum:
+                        for _i in T.serial(num_simd_c):
+                            if valid_m is None or warp_start_m + (_i // warp_cols) * micro_size_x < valid_m:
+                                T.make_filled_simdgroup_matrix(C_simd.data, _i, T.cast(0, accum_dtype))
+                    else:
+                        mps_emitter.simd_load(C_simd, C_buf, valid_m=valid_m)
+                    if valid_m is None or warp_end_m <= valid_m:
+                        multiply(A_local, B_local, C_simd, None)
+                    else:
+                        multiply(A_local, B_local, C_simd, valid_m)
+                    mps_emitter.simd_store(C_simd, C_buf, valid_m=valid_m)
 
         return _Simplify(_gemm_ss_shared, inline_let=True)
 
 
 class GemmMetal(GemmBase):
+    supports_runtime_valid_m = True
     def is_gemm_ss(self) -> bool:
         return is_shared(self.A) and is_shared(self.B)
 
@@ -309,6 +356,8 @@ class GemmMetal(GemmBase):
         a_tile_elems = micro_size_x * micro_size_k
         b_tile_elems = micro_size_k * micro_size_y
         c_tile_elems = micro_size_x * micro_size_y
+        valid_m = _partial_m_extent(self)
+        warp_m, _ = mps_emitter._get_warp_indices()
 
         A_region = self.ARegion
         B_region = self.BRegion
@@ -330,14 +379,15 @@ class GemmMetal(GemmBase):
                 B_local = T.alloc_local((warp_cols * b_tile_elems * inner_k_steps), b_dtype, scope="metal.cooperative_tensor")
                 if clear_accum:
                     for _i in T.serial(num_simd_c):
-                        T.cooperative_tensor_fill(C_buf.data, _i, T.cast(0, accum_dtype), micro_size_x, micro_size_y)
+                        if valid_m is None or warp_m * warp_row_tiles + (_i // warp_cols) * micro_size_x < valid_m:
+                            T.cooperative_tensor_fill(C_buf.data, _i, T.cast(0, accum_dtype), micro_size_x, micro_size_y)
                 for k_outer in T.serial(0, (block_K // (micro_size_k * inner_k_steps))):
                     for k_inner in T.serial(0, inner_k_steps):
                         ki = k_outer * inner_k_steps + k_inner
-                        mps_emitter.ldmatrix_a(A_local, A_region, ki, k_inner)
-                        mps_emitter.ldmatrix_b(B_local, B_region, ki, k_inner)
+                        mps_emitter.ldmatrix_a(A_local, A_region, ki, k_inner, valid_m)
+                        mps_emitter.ldmatrix_b(B_local, B_region, ki, k_inner, valid_m)
                     for k_inner in T.serial(0, inner_k_steps):
-                        mps_emitter.mma(A_local, B_local, C_buf, k_inner)
+                        mps_emitter.mma(A_local, B_local, C_buf, k_inner, valid_m)
 
             return _Simplify(_gemm_cooperative_tensor, inline_let=True)
 
@@ -348,16 +398,17 @@ class GemmMetal(GemmBase):
             C_ct = T.alloc_local((num_simd_c * c_tile_elems), accum_dtype, scope="metal.cooperative_tensor")
             if clear_accum:
                 for _i in T.serial(num_simd_c):
-                    T.cooperative_tensor_fill(C_ct.data, _i, T.cast(0, accum_dtype), micro_size_x, micro_size_y)
+                    if valid_m is None or warp_m * warp_row_tiles + (_i // warp_cols) * micro_size_x < valid_m:
+                        T.cooperative_tensor_fill(C_ct.data, _i, T.cast(0, accum_dtype), micro_size_x, micro_size_y)
             else:
-                mps_emitter.simd_load(C_ct, C_region)
+                mps_emitter.simd_load(C_ct, C_region, valid_m=valid_m)
             for k_outer in T.serial(0, (block_K // (micro_size_k * inner_k_steps))):
                 for k_inner in T.serial(0, inner_k_steps):
                     ki = k_outer * inner_k_steps + k_inner
-                    mps_emitter.ldmatrix_a(A_local, A_region, ki, k_inner)
-                    mps_emitter.ldmatrix_b(B_local, B_region, ki, k_inner)
+                    mps_emitter.ldmatrix_a(A_local, A_region, ki, k_inner, valid_m)
+                    mps_emitter.ldmatrix_b(B_local, B_region, ki, k_inner, valid_m)
                 for k_inner in T.serial(0, inner_k_steps):
-                    mps_emitter.mma(A_local, B_local, C_ct, k_inner)
-            mps_emitter.simd_store(C_ct, C_region)
+                    mps_emitter.mma(A_local, B_local, C_ct, k_inner, valid_m)
+            mps_emitter.simd_store(C_ct, C_region, valid_m=valid_m)
 
         return _Simplify(_gemm_with_c_writeback, inline_let=True)

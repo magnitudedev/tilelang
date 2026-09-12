@@ -33,6 +33,7 @@ def _gemm_impl(
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
     annotations: dict | None = None,
+    valid_m: int | tirx.PrimExpr | None = None,
 ) -> tirx.PrimExpr:
     """Shared GEMM implementation.
 
@@ -97,6 +98,13 @@ def _gemm_impl(
         if not isinstance(dim, tirx.IntImm):
             raise ValueError(f"T.gemm requires static tile dimensions, but {name} is symbolic: {dim}")
 
+    if valid_m is not None and (isinstance(valid_m, bool) or not isinstance(valid_m, (int, tirx.PrimExpr))):
+        raise TypeError(f"T.gemm valid_m must be an int, PrimExpr, or None, got {valid_m!r}")
+    elif isinstance(valid_m, int):
+        if not 0 <= valid_m <= int(M):
+            raise ValueError(f"T.gemm valid_m must be in [0, {int(M)}], got {valid_m}")
+        valid_m = tirx.const(valid_m, dtype=M.dtype)
+
     # Deprecated: every lowering consumes the complete operand BufferRegions,
     # so the serialized per-axis strides and final-axis offsets below are no
     # longer read in-tree and are NOT validated (the historic
@@ -125,9 +133,7 @@ def _gemm_impl(
     # The C++ side checks if arg 16 is a BufferLoadNode before using it,
     # so a non-BufferLoad value will be correctly ignored.
     mbar_arg = mbar if mbar is not None else tirx.const(0, dtype="int32")
-    return tirx.call_intrin(
-        "handle",
-        tirx.op.Op.get(op_key),
+    call_args = [
         A_arg,
         B_arg,
         C_arg,
@@ -147,6 +153,13 @@ def _gemm_impl(
         mbar_arg,
         C_coords[0],
         C_coords[1],
+    ]
+    if valid_m is not None:
+        call_args.append(valid_m)
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get(op_key),
+        *call_args,
         annotations=annotations,
     )
 
@@ -162,6 +175,7 @@ def gemm(
     k_pack: int = 1,
     mbar: BarrierType | None = None,
     annotations: dict | None = None,
+    valid_m: int | tirx.PrimExpr | None = None,
 ) -> tirx.PrimExpr:
     """TileLang GEMM operator.
 
@@ -186,6 +200,9 @@ def gemm(
         mbar (BarrierType, i.e. Buffer | BufferLoad, or Var, optional): Mbarrier in Blackwell.
             Required when this GEMM lowers to TCGEN5MMA. Defaults to None.
         annotations (Optional[dict]): Additional annotations.
+        valid_m (int | PrimExpr | None): Runtime-valid prefix of the M axis.
+            The physical A/C tile shapes remain static. Rows in ``[0, valid_m)``
+            are computed; the suffix is unspecified. Defaults to the full tile.
 
     Returns:
         tirx.Call: A handle to the GEMM operation.
@@ -203,6 +220,7 @@ def gemm(
         0,
         mbar,
         annotations=annotations,
+        valid_m=valid_m,
     )
 
 

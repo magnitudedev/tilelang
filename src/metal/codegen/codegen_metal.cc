@@ -1488,6 +1488,25 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
     PrintSimdgroupReduce("simd_and", true, op, os);
   } else if (op->op.same_as(tl::warp_reduce_bitor())) {
     PrintSimdgroupReduce("simd_or", true, op, os);
+  } else if (op->op.same_as(tl::atomic_add_elem_op()) ||
+             op->op.same_as(tl::atomic_add_ret_elem_op())) {
+    TVM_FFI_ICHECK_GE(op->args.size(), 2U);
+    DataType value_dtype = op->args[1].dtype();
+    TVM_FFI_ICHECK(value_dtype.is_scalar() && value_dtype.bits() == 32 &&
+                   (value_dtype.is_int() || value_dtype.is_uint()))
+        << "Metal scalar atomic add supports int32 and uint32, got "
+        << value_dtype;
+    const char *atomic_type = value_dtype.is_int() ? "atomic_int" : "atomic_uint";
+    const std::string address_space = GetAddrSpaceOf(op->args[0]);
+    TVM_FFI_ICHECK(address_space == "device" || address_space == "threadgroup")
+        << "Metal scalar atomic add requires device or threadgroup storage, got "
+        << address_space;
+    os << "atomic_fetch_add_explicit(reinterpret_cast<" << address_space << " "
+       << atomic_type << " *>(";
+    this->PrintExpr(op->args[0], os);
+    os << "), ";
+    this->PrintExpr(op->args[1], os);
+    os << ", memory_order_relaxed)";
   } else if (op->op.same_as(tl::__exp())) {
     PrintFastMath("exp", op, os);
   } else if (op->op.same_as(tl::__exp10())) {
@@ -1842,12 +1861,16 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
          << " + __i] = __ct_c[__i]; }";
     }
   } else if (op->op.same_as(builtin::reinterpret())) {
-    // generate as_type<TYPE>(ARG)
+    // Metal applies C integer promotion to narrow integer expressions.  Cast
+    // the expression back to its TIR dtype before as_type so a uint16 bitwise
+    // expression remains a legal half bitcast rather than becoming int.
     os << "(as_type<";
     this->PrintType(op->dtype, os);
-    os << ">(";
+    os << ">((";
+    this->PrintType(op->args[0].dtype(), os);
+    os << ")(";
     this->PrintExpr(op->args[0], os);
-    os << "))";
+    os << ")))";
   } else if (op->op.same_as(builtin::handle_add_byte_offset())) {
     TVM_FFI_ICHECK_EQ(op->args.size(), 2U);
     std::string addr_space = GetAddrSpaceOf(op->args[0]);
