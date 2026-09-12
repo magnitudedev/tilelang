@@ -107,9 +107,6 @@ public:
   BufferRegion aRegion_, bRegion_, cRegion_;
   bool transA_, transB_;
   int m_, n_, k_;
-  int strideA_, strideB_;
-  // Offsets may be symbolic (e.g. a sliced operand B[:, j*64:...] in a loop).
-  PrimExpr offsetA_, offsetB_;
   PrimExpr clearAccum_ = const_false();
   // Runtime-valid prefix of the static M tile. Backends predicate whole
   // instruction rows outside [0, validM_); the physical tile remains static.
@@ -143,10 +140,6 @@ public:
         .def_ro("m", &GemmNode::m_)
         .def_ro("n", &GemmNode::n_)
         .def_ro("k", &GemmNode::k_)
-        .def_ro("strideA", &GemmNode::strideA_)
-        .def_ro("strideB", &GemmNode::strideB_)
-        .def_ro("offsetA", &GemmNode::offsetA_)
-        .def_ro("offsetB", &GemmNode::offsetB_)
         .def_ro("clearAccum", &GemmNode::clearAccum_)
         .def_ro("validM", &GemmNode::validM_)
         .def_ro("mbar", &GemmNode::mbar_)
