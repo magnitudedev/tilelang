@@ -20,6 +20,29 @@ if TYPE_CHECKING:
 
 TargetLike = str | dict[str, object] | TVMTarget
 
+
+def compiler_identity() -> str:
+    """Identity of the compiler installation used by the persistent kernel cache.
+
+    This excludes program, target, schedules and tuning inputs, which callers
+    identify separately. Like the cache itself, editable compiler Python/native
+    changes require a fresh process; this is not a hot-reload mechanism.
+    """
+    from hashlib import sha256
+    import json
+
+    from .kernel_cache import KernelCache
+
+    provenance = dict(KernelCache._get_base_key())
+    # Evidence provenance must not omit native identity because a caller disabled
+    # that component of cache invalidation policy.
+    native = KernelCache._get_tilelang_lib_stamp()
+    if native is None:
+        raise RuntimeError("cannot identify the installed TileLang native compiler libraries")
+    provenance["tilelang_lib"] = native
+    return sha256(json.dumps(provenance, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 # Create a map of singleton instance of KernelCaches
 _dispatch_map: dict[str, KernelCache] = {
     "tvm_ffi": TVMFFIKernelCache(),

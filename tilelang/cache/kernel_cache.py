@@ -14,6 +14,7 @@ import threading
 import uuid
 import sys
 from hashlib import sha256
+from pathlib import Path
 from typing import Literal
 from collections.abc import Callable
 
@@ -138,8 +139,27 @@ class KernelCache:
         return None
 
     @staticmethod
+    @functools.cache
+    def _get_python_source_stamp() -> str:
+        """Include Python lowering/pipeline changes in editable compiler identity.
+
+        Native-library identity alone misses Python implementations of layout,
+        instruction lowering, and pass composition. Hash once per process,
+        using relative paths so equivalent installations share cache entries.
+        """
+        root = Path(__file__).resolve().parent.parent
+        digest = sha256()
+        for path in sorted(root.rglob("*.py")):
+            digest.update(path.relative_to(root).as_posix().encode())
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    @staticmethod
     def _get_base_key() -> dict:
         base = {"version": __version__}
+        base["python_sources"] = KernelCache._get_python_source_stamp()
         if env.should_use_kernel_cache_lib_stamp():
             lib_stamp = KernelCache._get_tilelang_lib_stamp()
             if lib_stamp:

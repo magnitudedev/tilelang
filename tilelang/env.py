@@ -373,7 +373,7 @@ class Environment:
         "TILELANG_DISABLE_CACHE", "0"
     )  # disable kernel cache, usually for unit testing / debugging, high priority
     TILELANG_KERNEL_CACHE_USE_LIB_STAMP = EnvVar(
-        "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0"
+        "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "1"
     )  # include native TileLang library content hash in kernel cache keys
     TILELANG_CLEANUP_TEMP_FILES = EnvVar(
         "TILELANG_CLEANUP_TEMP_FILES", "1"
