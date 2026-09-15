@@ -5,7 +5,6 @@ import re
 from tvm import tirx
 
 from tilelang.backend.device_codegen import DeviceCodegen
-from tilelang.backend.capabilities import MatrixInstruction, target_limits
 from tilelang.backend.host_codegen import STANDARD_HOST_CODEGENS
 from tilelang.backend.module import BackendModule, register_backend
 from tilelang.contrib import nvcc
@@ -13,28 +12,6 @@ from tilelang.env import CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
 from tilelang.transform import PassConfigKey
 
 from . import codegen, execution_backend, pipeline
-
-
-def _capabilities(target):
-    from tilelang.cuda.target import target_has_async_copy
-    from tilelang.backend.capabilities import DEFAULT_DTYPES
-
-    arch = str(target.attrs.get("arch", ""))
-    match = re.match(r"sm_(\d+)", arch)
-    version = int(match.group(1)) if match else 0
-    dtypes = DEFAULT_DTYPES - {"bfloat16"} if version < 80 else DEFAULT_DTYPES
-    matrices = []
-    if version >= 70:
-        # Legal tile geometry supported by the selected GEMM lowering.
-        matrices.append(MatrixInstruction(16, 16, 16, "float16", "float32"))
-    if version >= 80:
-        matrices.append(MatrixInstruction(16, 16, 16, "bfloat16", "float32"))
-    features = {"subgroup_exchange", "atomic.add.float32", "atomic.add.int32"}
-    if arch and target_has_async_copy(target):
-        features.add("async_copy")
-    return target_limits(
-        target, subgroup_width=32, matrix_instructions=tuple(matrices), features=frozenset(features), supported_dtypes=dtypes
-    )
 
 
 _CUDA_GLOBAL_KERNEL_PATTERN = re.compile(r'(?:extern\s+"C"\s+)?__global__\s+void\s+(?:__launch_bounds__\([^\)]*\)\s+)?(\w+)')
@@ -158,7 +135,6 @@ BACKEND = register_backend(
             )
         },
         execution_backends=execution_backend.CUDA_EXECUTION_BACKENDS,
-        capabilities=_capabilities,
         host_codegens=STANDARD_HOST_CODEGENS,
         callbacks={
             "tilelang_callback_cuda_validate": tilelang_callback_cuda_validate,

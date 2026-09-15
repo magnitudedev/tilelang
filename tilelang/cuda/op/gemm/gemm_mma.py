@@ -39,6 +39,10 @@ class GemmMMA(GemmBase):
         )
         return emitter
 
+    def gemm_plan(self, target: Target, thread_nums: int):
+        from tilelang.analysis import GemmPlan
+        return GemmPlan.from_emitter(self, self._make_mma_emitter(target, thread_nums))
+
     def infer_layout(self, target: Target, thread_nums: int):
         mma_emitter = self._make_mma_emitter(target, thread_nums)
         if self.is_gemm_ss():

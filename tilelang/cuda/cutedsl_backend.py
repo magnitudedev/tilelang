@@ -6,9 +6,6 @@ from tilelang.backend.module import BackendModule, register_backend
 from . import codegen, execution_backend, pipeline
 
 
-from .backend import _capabilities
-
-
 BACKEND = register_backend(
     BackendModule(
         name="cutedsl",
@@ -23,6 +20,5 @@ BACKEND = register_backend(
             )
         },
         execution_backends=execution_backend.CUTEDSL_EXECUTION_BACKENDS,
-        capabilities=_capabilities,
     )
 )

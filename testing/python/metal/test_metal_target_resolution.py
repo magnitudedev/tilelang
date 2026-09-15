@@ -26,9 +26,9 @@ def test_explicit_targets_do_not_query_or_inherit_local_device(monkeypatch):
         resolved = determine_target(value, return_object=True)
         tvm.ir.assert_structural_equal(resolved, explicit)
         context = create_backend_context(value, execution_backend="tvm_ffi")
-        assert context.capabilities.max_threads_per_group == 64
-        assert "bfloat16" not in context.capabilities.supported_dtypes
-        assert context.capabilities.subgroup_width == 32
+        assert context.target.attrs["max_threads_per_block"] == 64
+        assert not context.target.attrs["supports_bfloat16"]
+        assert context.target.attrs["thread_warp_size"] == 32
 
 
 def test_bare_backend_detects_once_and_is_idempotent(monkeypatch):

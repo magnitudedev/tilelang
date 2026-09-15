@@ -8,8 +8,6 @@ EXECUTION_BACKENDS = [
         "tvm_ffi",
         enable_host_codegen=True,
         enable_device_compile=True,
-        native_multi_launch=True,
-        native_argument_binding=True,
     ),
     ExecutionBackendSpec("cython"),
 ]

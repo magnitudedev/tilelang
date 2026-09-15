@@ -26,8 +26,6 @@ CUDA_EXECUTION_BACKENDS = [
         "tvm_ffi",
         enable_host_codegen=True,
         enable_device_compile=True,
-        native_multi_launch=True,
-        native_argument_binding=True,
         supports_callee_allocated_outputs=True,
     ),
     ExecutionBackendSpec("nvrtc", is_available=_is_nvrtc_available),

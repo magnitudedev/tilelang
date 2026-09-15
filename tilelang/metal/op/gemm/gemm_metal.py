@@ -141,15 +141,7 @@ class GemmMetalSimdGroup(GemmBase):
             result[self.B] = matrix_layout(self.B, int(self.K), warp_n, m_warp, self.trans_B, m_warp, "B")
         return result
 
-    def lower(
-        self,
-        layout_map: dict,
-        target: Target,
-        thread_bounds: Range,
-        thread_index: tir.PrimExpr,
-        mbar_phase_expr: tir.PrimExpr | None = None,
-    ):
-        thread_nums = thread_bounds.extent
+    def _make_simd_emitter(self, target, thread_nums, thread_var=None, layout_map=None):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_METAL)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
@@ -167,11 +159,29 @@ class GemmMetalSimdGroup(GemmBase):
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
             chunk=self.chunk,
-            thread_var=thread_index,
+            thread_var=thread_var,
             use_cooperative_tensor=False,
-            a_stride_override=_simd_operand_pitch(self.ARegion, layout_map) if is_shared(self.A) else None,
-            b_stride_override=_simd_operand_pitch(self.BRegion, layout_map) if is_shared(self.B) else None,
+            a_stride_override=_simd_operand_pitch(self.ARegion, layout_map) if layout_map is not None and is_shared(self.A) else None,
+            b_stride_override=_simd_operand_pitch(self.BRegion, layout_map) if layout_map is not None and is_shared(self.B) else None,
         )
+
+        return mps_emitter
+
+    def gemm_plan(self, target, thread_nums):
+        from tilelang.analysis import GemmPlan
+        return GemmPlan.from_emitter(self, self._make_simd_emitter(target, thread_nums))
+
+    def lower(
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_bounds: Range,
+        thread_index: tir.PrimExpr,
+        mbar_phase_expr: tir.PrimExpr | None = None,
+    ):
+        thread_nums = thread_bounds.extent
+        mps_emitter = self._make_simd_emitter(target, thread_nums, thread_index, layout_map)
+        warp_row_tiles = mps_emitter.warp_row_tiles
 
         a_dtype = self.a_dtype
         b_dtype = self.b_dtype
@@ -324,6 +334,11 @@ class GemmMetal(GemmBase):
             m_warp,
             n_warp,
         )
+
+    def gemm_plan(self, target, thread_nums):
+        from tilelang.analysis import GemmPlan
+        emitter, _, _ = self._make_mps_emitter(target, thread_nums)
+        return GemmPlan.from_emitter(self, emitter)
 
     def infer_layout(self, target: Target, thread_nums: int):
         result = {}
