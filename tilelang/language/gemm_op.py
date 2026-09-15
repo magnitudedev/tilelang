@@ -1,6 +1,7 @@
 """GEMM (General Matrix Multiplication) operators exposed on the TileLang language surface."""
 
 from __future__ import annotations
+from tvm import DataType
 
 from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.tileop.base import GemmWarpPolicy
@@ -94,12 +95,17 @@ def _gemm_impl(
         if not isinstance(dim, tirx.IntImm):
             raise ValueError(f"T.gemm requires static tile dimensions, but {name} is symbolic: {dim}")
 
-    if valid_m is not None and (isinstance(valid_m, bool) or not isinstance(valid_m, (int, tirx.PrimExpr))):
-        raise TypeError(f"T.gemm valid_m must be an int, PrimExpr, or None, got {valid_m!r}")
+    if valid_m is None:
+        valid_m = M
+    elif isinstance(valid_m, bool) or not isinstance(valid_m, (int, tirx.PrimExpr)):
+        raise TypeError("T.gemm valid_m must be a scalar integer expression")
     elif isinstance(valid_m, int):
-        if not 0 <= valid_m <= int(M):
-            raise ValueError(f"T.gemm valid_m must be in [0, {int(M)}], got {valid_m}")
         valid_m = tirx.const(valid_m, dtype=M.dtype)
+    dtype = DataType(valid_m.dtype)
+    if dtype.lanes != 1 or not str(dtype).startswith(("int", "uint")) or dtype.bits == 1:
+        raise TypeError("T.gemm valid_m must be a scalar integer expression")
+    if isinstance(valid_m, tirx.IntImm) and not 0 <= int(valid_m) <= int(M):
+        raise ValueError(f"T.gemm valid_m must be in [0, {int(M)}], got {valid_m}")
 
     if mbar is not None:
         assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
@@ -130,8 +136,7 @@ def _gemm_impl(
         C_coords[0],
         C_coords[1],
     ]
-    if valid_m is not None:
-        call_args.append(valid_m)
+    call_args.append(valid_m)
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get(op_key),
@@ -174,6 +179,9 @@ def gemm(
         valid_m (int | PrimExpr | None): Runtime-valid prefix of the M axis.
             The physical A/C tile shapes remain static. Rows in ``[0, valid_m)``
             are computed; the suffix is unspecified. Defaults to the full tile.
+            The runtime extent must be in [0, M] and uniform across each
+            participating SIMD group. Full physical operand tiles must remain
+            addressable, including the unused part of a partial instruction row.
 
     Backend dialects extend this signature with their hardware's knobs:
     ``tilelang.cuda.language.gemm`` adds ``mbar`` (Blackwell TCGEN5MMA
@@ -429,6 +437,7 @@ def tcgen05_gemm_blockscaled(
         mbar,
         C_coords[0],
         C_coords[1],
+        M,  # full valid-row extent for block-scaled GEMM
         SFA_arg,
         SFB_arg,
         k_start,
@@ -533,6 +542,7 @@ def mma_gemm_blockscaled(
         tirx.const(0, dtype="int32"),  # no mbarrier for synchronous mma.sync
         C_coords[0],
         C_coords[1],
+        M,  # full valid-row extent for block-scaled GEMM
         SFA_arg,
         SFB_arg,
         k_start,

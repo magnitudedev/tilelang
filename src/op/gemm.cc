@@ -8,6 +8,7 @@
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "builtin.h"
 #include <tvm/tirx/builtin.h>
@@ -76,7 +77,7 @@ void RegisterGemmImpl(GemmImpl impl) {
  *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
  *      (optional) mbar (BufferLoad or const-0 placeholder),
  *      cCoord_y (PrimExpr), cCoord_x (PrimExpr),
- *      (optional) valid_m (PrimExpr), or
+ *      valid_m (PrimExpr),
  *      (optional, blockscaled) SFA, SFB regions, k_start (PrimExpr)]
  *   Backend lowering knobs (k_pack, wg_wait) ride in the annotations map.
  */
@@ -102,7 +103,17 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->k_ = args[7].as<IntImm>().value()->value;
   node->policy_ = GemmWarpPolicy(args[8].as<IntImm>().value()->value);
   node->clearAccum_ = args[9].as<PrimExpr>().value();
-  node->validM_ = IntImm(DataType::Int(32), node->m_);
+  ICHECK(args.size() == 14 || args.size() == 17)
+      << "GEMM expects 14 operands, or 17 with block scales";
+  node->validM_ = args[13];
+  auto extent_type = node->validM_.dtype();
+  ICHECK(extent_type.is_scalar() && !extent_type.is_bool() &&
+         (extent_type.is_int() || extent_type.is_uint()))
+      << "GEMM valid_m must be a scalar integer expression";
+  if (const auto *extent = node->validM_.as<IntImmNode>()) {
+    ICHECK(extent->value >= 0 && extent->value <= node->m_)
+        << "GEMM valid_m must be in [0, M]";
+  }
   // k_pack rides in the annotations (a ROCm MFMA/WMMA lowering knob set by
   // the ROCm dialect), not in the positional call protocol.
   if (auto val = annotations.Get("k_pack")) {
@@ -133,19 +144,33 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[11].as<PrimExpr>().value(), args[12].as<PrimExpr>().value()});
-  if (args.size() == 14) {
-    node->validM_ = args[13].as<PrimExpr>().value();
-  } else if (args.size() > 13) {
-    node->sfaRegion_ = NormalizeToBufferRegion(args[13]);
-    node->sfbRegion_ = NormalizeToBufferRegion(args[14]);
-    node->sfKStart_ = args[15].as<PrimExpr>().value();
+  if (args.size() == 17) {
+    node->sfaRegion_ = NormalizeToBufferRegion(args[14]);
+    node->sfbRegion_ = NormalizeToBufferRegion(args[15]);
+    node->sfKStart_ = args[16];
   }
   node->annotations_ = annotations;
   data_ = std::move(node);
 }
 
+namespace {
+void AppendExtentReads(const PrimExpr &extent,
+                       ffi::Array<BufferRegion> &reads) {
+  PostOrderVisit(extent, [&](const ObjectRef &node) {
+    if (const auto *load = node.as<BufferLoadNode>()) {
+      ffi::Array<Range> region;
+      for (const auto &index : load->indices) {
+        region.push_back(Range::FromMinExtent(index, 1));
+      }
+      reads.push_back(BufferRegion(load->buffer, region));
+    }
+  });
+}
+} // namespace
+
 AccessRegions GemmNode::GetAccessRegions() const {
   AccessRegions result;
+  AppendExtentReads(validM_, result.reads);
   result.reads.push_back(aRegion_);
   result.reads.push_back(bRegion_);
   if (!is_one(clearAccum_)) {
@@ -163,6 +188,7 @@ AccessRegions GemmNode::GetAccessRegions() const {
 
 ffi::Array<BufferRegion> GemmNode::GetReadBeforeWriteRegions() const {
   ffi::Array<BufferRegion> result;
+  AppendExtentReads(validM_, result);
   result.push_back(aRegion_);
   result.push_back(bRegion_);
   if (sfaRegion_.defined()) {
