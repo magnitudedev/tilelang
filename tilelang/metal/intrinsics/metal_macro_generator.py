@@ -305,7 +305,6 @@ class MPSIntrinEmitter:
         buffer, extra, offset_m, offset_n, stride = self._parse_buffer_nd(C_dst)
 
         ct_op = T.cooperative_tensor_store if is_store else T.cooperative_tensor_load
-        simd_op = T.simdgroup_store if is_store else T.simdgroup_load
         access_mode = "w" if is_store else "r"
 
         @T.macro
@@ -332,15 +331,14 @@ class MPSIntrinEmitter:
                                 OPERAND_DEST,
                             )
                         else:
-                            simd_op(
-                                C_simd_buf.data,
-                                index_c,
-                                ptr,
-                                stride,
-                                micro_size_x,
-                                micro_size_y,
-                                T.bool(False),
-                            )
+                            lane = self.get_thread_binding() % self.WARP_SIZE
+                            mr = lane // 16 * 4 + lane % 8 // 2
+                            mc = lane % 16 // 8 * 4 + lane % 2 * 2
+                            for element in T.unroll(2, explicit=True):
+                                if is_store:
+                                    buffer[extra + (row + mr, col + mc + element)] = C_simd_buf[index_c * 2 + element]
+                                else:
+                                    C_simd_buf[index_c * 2 + element] = buffer[extra + (row + mr, col + mc + element)]
 
         return _simdgroup_copy(C_simd_buf, buffer, offset_m, offset_n, stride, warp_m, warp_n)
 

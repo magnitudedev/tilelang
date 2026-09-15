@@ -37,7 +37,7 @@ def fragment_operands(m, n, k, a_fragment, b_fragment, trans_a=False, trans_b=Fa
 @tilelang.jit(target="metal", execution_backend="torch")
 def offset_transposed_region():
     """A transposed operand keeps physical row/column offsets unswapped."""
-    m = n = k = 32
+    m = n = 32
 
     @T.prim_func
     def main(
@@ -64,9 +64,9 @@ def offset_transposed_region():
 
 
 @tilelang.jit(target="metal", execution_backend="torch")
-def runtime_valid_m_gemm():
+def runtime_valid_m_gemm(m=64):
     """A runtime M prefix predicates complete 8-row simdgroup tiles."""
-    m, n, k = 64, 32, 32
+    n, k = 32, 32
 
     @T.prim_func
     def main(
@@ -109,15 +109,31 @@ def test_transposed_buffer_region_preserves_physical_offsets():
 
 
 @tilelang.testing.requires_metal
-def test_runtime_valid_m_computes_unaligned_prefix():
+@pytest.mark.parametrize("m,rows", [(64, row) for row in (0, 1, 8, 9, 25, 32, 63, 64)] + [(32, row) for row in (0, 7, 9, 32)])
+def test_runtime_valid_m_computes_unaligned_prefix(m, rows):
     torch.manual_seed(315)
-    a = torch.randn((64, 32), dtype=torch.float16)
+    a = torch.randn((m, 32), dtype=torch.float16)
     b = torch.randn((32, 32), dtype=torch.float16)
-    valid_m = torch.tensor([25], dtype=torch.int32)
-    output = torch.full((64, 32), 17.0, dtype=torch.float32, device="mps")
-    runtime_valid_m_gemm()(a.to("mps"), b.to("mps"), valid_m.to("mps"), output)
-    expected = a[:25].float() @ b.float()
-    torch.testing.assert_close(output.cpu()[:25], expected, atol=1e-4, rtol=1e-4)
+    valid_m = torch.tensor([rows], dtype=torch.int32)
+    output = torch.full((m, 32), 17.0, dtype=torch.float32, device="mps")
+    runtime_valid_m_gemm(m)(a.to("mps"), b.to("mps"), valid_m.to("mps"), output)
+    expected = a[:rows].float() @ b.float()
+    observed = output.cpu()
+    torch.testing.assert_close(observed[:rows], expected, atol=1e-4, rtol=1e-4)
+    # The contract permits the final partial instruction tile to execute, but
+    # completely inactive 8-row tiles must not clear or publish their contents.
+    inactive = (rows + 7) // 8 * 8
+    torch.testing.assert_close(observed[inactive:], torch.full_like(observed[inactive:], 17.0))
+
+
+@pytest.mark.parametrize("m", [32, 64])
+def test_runtime_valid_m_emits_one_predicated_matrix_body(m):
+    program = runtime_valid_m_gemm.get_tir(m)
+    with tvm.target.Target("metal"):
+        source = tilelang.lower(program, target="metal").kernel_source
+    # Mx32x32, 8x8x8 instructions, four SIMD groups. The runtime prefix
+    # must not triple this body into full-tile/full-warp/partial-warp variants.
+    assert source.count("simdgroup_multiply_accumulate(") == 1
 
 
 @tilelang.testing.requires_metal

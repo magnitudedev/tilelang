@@ -37,19 +37,66 @@ def _partial_m_extent(gemm: GemmBase):
     return valid_m
 
 
-def _make_padded_layout(buffer):
-    shape = buffer.shape
-    stride = int(shape[-2])
-    continuous = int(shape[-1])
+def _padded_stride(buffer):
+    continuous = int(buffer.shape[-1])
     element_bits = int(tvm.DataType(buffer.dtype).bits)
     padded = continuous
     if (element_bits * continuous) % 256 == 0:
         padded += 128 // element_bits
-    return Layout([stride, continuous], lambda i, j: i * padded + j)
+    return padded
+
+
+def _make_padded_layout(buffer):
+    shape = buffer.shape
+    padded = _padded_stride(buffer)
+    return Layout(shape, lambda i, j: i * padded + j)
+
+
+def _simd_shared_stride(buffer, target):
+    stride = _padded_stride(buffer)
+    limit = int(target.attrs.get("max_shared_memory_per_block", 32768))
+    if int(buffer.shape[0]) * stride * tvm.DataType(buffer.dtype).bits // 8 > limit:
+        stride = int(buffer.shape[-1])
+    return stride
+
+
+def _make_simd_shared_layout(buffer, target):
+    """Keep affine rows so native matrix loads consume the physical pitch."""
+    stride = _simd_shared_stride(buffer, target)
+    return Layout(buffer.shape, lambda i, j: i * stride + j)
+
+
+def _simd_operand_pitch(region, layout_map):
+    """Prove the physical 8x8 instruction footprint, not a logical row pitch."""
+    buffer = region.buffer
+    layout = layout_map.get(buffer)
+    if layout is None:
+        return buffer.strides[-2] if buffer.strides else buffer.shape[-1]
+    analyzer = arith.Analyzer()
+    tile_i, tile_j = tir.Var("matrix_tile_i", "int32"), tir.Var("matrix_tile_j", "int32")
+    row, col = tir.Var("matrix_row", "int32"), tir.Var("matrix_col", "int32")
+    analyzer.bind(row, Range(0, 8))
+    analyzer.bind(col, Range(0, 8))
+    base = [item.min for item in region.region]
+    base[-2] += tile_i * 8
+    base[-1] += tile_j * 8
+    expression = layout.get_linearized_forward_index()
+    variables = layout.get_forward_vars()
+
+    def offset(i, j):
+        indices = [*base[:-2], base[-2] + i, base[-1] + j]
+        return analyzer.simplify(tir.stmt_functor.substitute(expression, dict(zip(variables, indices))))
+
+    origin = offset(0, 0)
+    pitch = analyzer.simplify(offset(1, 0) - origin)
+    if not isinstance(pitch, tir.IntImm) or int(pitch) < 8 or not analyzer.can_prove_equal(offset(row, col), origin + row * pitch + col):
+        raise ValueError("Metal SIMD-group shared layout must expose a contiguous, constant-pitch 8x8 instruction tile")
+    return int(pitch)
 
 
 class GemmMetalSimdGroup(GemmBase):
     supports_runtime_valid_m = True
+
     def is_gemm_ss(self) -> bool:
         return is_shared(self.A) and is_shared(self.B)
 
@@ -80,6 +127,10 @@ class GemmMetalSimdGroup(GemmBase):
             )
 
         result = {}
+        # Shared operands and native matrix loads agree on their physical pitch.
+        for buffer in (self.A, self.B):
+            if is_shared(buffer) and len(buffer.shape) == 2:
+                result[buffer] = _make_simd_shared_layout(buffer, target)
         if is_fragment(self.C):
             result[self.C] = matrix_layout(self.C, warp_m, warp_n, m_warp)
         if is_fragment(self.A):
@@ -118,6 +169,8 @@ class GemmMetalSimdGroup(GemmBase):
             chunk=self.chunk,
             thread_var=thread_index,
             use_cooperative_tensor=False,
+            a_stride_override=_simd_operand_pitch(self.ARegion, layout_map) if is_shared(self.A) else None,
+            b_stride_override=_simd_operand_pitch(self.BRegion, layout_map) if is_shared(self.B) else None,
         )
 
         a_dtype = self.a_dtype
@@ -130,10 +183,13 @@ class GemmMetalSimdGroup(GemmBase):
         micro_size_k = mps_emitter.micro_size_k
         micro_size_x = mps_emitter.micro_size_x
         valid_m = _partial_m_extent(self)
-        full_m = self.M
         warp_m, _ = mps_emitter._get_warp_indices()
         warp_start_m = warp_m * warp_row_tiles
-        warp_end_m = warp_start_m + warp_row_tiles
+        # The outer warp predicate already proves its sole instruction row is
+        # active. Do not repeat that dynamic condition in every load/MMA/clear;
+        # apart from code size, repeated source-bound loads obstruct native
+        # instruction scheduling. Multi-row warps still predicate each row.
+        instruction_bound = valid_m if warp_rows > 1 else None
 
         A_region = self.ARegion
         B_region = self.BRegion
@@ -172,58 +228,42 @@ class GemmMetalSimdGroup(GemmBase):
 
             @T.prim_func
             def _gemm_ss_simdgroup() -> None:
-                A_local = T.alloc_local((warp_rows * 64), a_dtype, scope="metal.simdgroup")
-                B_local = T.alloc_local((warp_cols * 64), b_dtype, scope="metal.simdgroup")
-                if valid_m is not None and valid_m == full_m:
+                A_local = T.alloc_local((warp_rows * 2,), a_dtype)
+                B_local = T.alloc_local((warp_cols * 2,), b_dtype)
+                # A runtime prefix predicates instruction rows, not three
+                # separately expanded copies of the whole contraction. Static
+                # full tiles have valid_m=None and simplify to the unguarded
+                # body; partial tiles retain the emitter's load/MMA predicates.
+                if valid_m is None or warp_start_m < valid_m:
                     if clear_accum:
                         for _i in T.serial(num_simd_c):
-                            T.make_filled_simdgroup_matrix(C_buf.data, _i, T.cast(0, accum_dtype))
-                    multiply(A_local, B_local, C_buf, None)
-                else:
-                    if valid_m is None or warp_start_m < valid_m:
-                        if clear_accum:
-                            for _i in T.serial(num_simd_c):
-                                if valid_m is None or warp_start_m + (_i // warp_cols) * micro_size_x < valid_m:
-                                    T.make_filled_simdgroup_matrix(C_buf.data, _i, T.cast(0, accum_dtype))
-                        if valid_m is None or warp_end_m <= valid_m:
-                            multiply(A_local, B_local, C_buf, None)
-                        else:
-                            multiply(A_local, B_local, C_buf, valid_m)
+                            if instruction_bound is None or warp_start_m + (_i // warp_cols) * micro_size_x < instruction_bound:
+                                T.make_filled_simdgroup_matrix(C_buf.data, _i, T.cast(0, accum_dtype))
+                    multiply(A_local, B_local, C_buf, instruction_bound)
 
             return _Simplify(_gemm_ss_simdgroup, inline_let=True)
 
         @T.prim_func
         def _gemm_ss_shared() -> None:
-            A_local = T.alloc_local((warp_rows * 64), a_dtype, scope="metal.simdgroup")
-            B_local = T.alloc_local((warp_cols * 64), b_dtype, scope="metal.simdgroup")
-            C_simd = T.alloc_local((num_simd_c * 64), accum_dtype, scope="metal.simdgroup")
-            if valid_m is not None and valid_m == full_m:
+            A_local = T.alloc_local((warp_rows * 2,), a_dtype)
+            B_local = T.alloc_local((warp_cols * 2,), b_dtype)
+            C_simd = T.alloc_local((num_simd_c * 2,), accum_dtype)
+            if valid_m is None or warp_start_m < valid_m:
                 if clear_accum:
                     for _i in T.serial(num_simd_c):
-                        T.make_filled_simdgroup_matrix(C_simd.data, _i, T.cast(0, accum_dtype))
+                        if instruction_bound is None or warp_start_m + (_i // warp_cols) * micro_size_x < instruction_bound:
+                            T.make_filled_simdgroup_matrix(C_simd.data, _i, T.cast(0, accum_dtype))
                 else:
-                    mps_emitter.simd_load(C_simd, C_buf)
-                multiply(A_local, B_local, C_simd, None)
-                mps_emitter.simd_store(C_simd, C_buf)
-            else:
-                if valid_m is None or warp_start_m < valid_m:
-                    if clear_accum:
-                        for _i in T.serial(num_simd_c):
-                            if valid_m is None or warp_start_m + (_i // warp_cols) * micro_size_x < valid_m:
-                                T.make_filled_simdgroup_matrix(C_simd.data, _i, T.cast(0, accum_dtype))
-                    else:
-                        mps_emitter.simd_load(C_simd, C_buf, valid_m=valid_m)
-                    if valid_m is None or warp_end_m <= valid_m:
-                        multiply(A_local, B_local, C_simd, None)
-                    else:
-                        multiply(A_local, B_local, C_simd, valid_m)
-                    mps_emitter.simd_store(C_simd, C_buf, valid_m=valid_m)
+                    mps_emitter.simd_load(C_simd, C_buf, valid_m=instruction_bound)
+                multiply(A_local, B_local, C_simd, instruction_bound)
+                mps_emitter.simd_store(C_simd, C_buf, valid_m=instruction_bound)
 
         return _Simplify(_gemm_ss_shared, inline_let=True)
 
 
 class GemmMetal(GemmBase):
     supports_runtime_valid_m = True
+
     def is_gemm_ss(self) -> bool:
         return is_shared(self.A) and is_shared(self.B)
 
@@ -295,15 +335,6 @@ class GemmMetal(GemmBase):
             result[self.C] = emitter.make_cooperative_tensor_store_layout(self.C)
         return result
 
-    @staticmethod
-    def _get_padded_stride(buffer):
-        continuous = int(buffer.shape[-1])
-        element_bits = int(tvm.DataType(buffer.dtype).bits)
-        padded = continuous
-        if (element_bits * continuous) % 256 == 0:
-            padded += 128 // element_bits
-        return padded
-
     def lower(
         self,
         layout_map: dict,
@@ -319,8 +350,8 @@ class GemmMetal(GemmBase):
 
         from tilelang.metal.intrinsics.metal_macro_generator import MPSIntrinEmitter
 
-        a_stride = self._get_padded_stride(self.A) if self.is_gemm_ss() else None
-        b_stride = self._get_padded_stride(self.B) if self.is_gemm_ss() else None
+        a_stride = _padded_stride(self.A) if self.is_gemm_ss() else None
+        b_stride = _padded_stride(self.B) if self.is_gemm_ss() else None
 
         c_bytes_per_thread = warp_row_tiles * warp_col_tiles * 64
         inner_k_steps = 2 if c_bytes_per_thread <= 128 else 1

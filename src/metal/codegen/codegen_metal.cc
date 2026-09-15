@@ -820,15 +820,8 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
     stream << "simdgroup_" << dtype_str << "8x8 " << vid << '['
            << constant_size / elements_per_matrix << "];\n";
   } else {
-    // Apply 16-byte alignment padding to shared/threadgroup memory
-    // to avoid bank conflicts on Apple GPUs (following MLX practice).
-    // Apple GPU shared memory has banks of 16 bytes; padding prevents
-    // the same bank being accessed by multiple threads simultaneously.
-    if (scope == "shared" || scope == "threadgroup") {
-      int dtype_bytes = dtype.bytes();
-      int padding_elems = (dtype_bytes > 0) ? (16 / dtype_bytes) : 0;
-      constant_size += padding_elems;
-    }
+    // Layout inference owns bank mapping and allocation extent. Appending
+    // bytes here changes no address or bank, and rejects exact-capacity tiles.
     PrintStorageScope(scope, stream);
     PrintType(dtype, stream);
     if (scope == "local.var") {

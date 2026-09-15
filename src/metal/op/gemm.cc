@@ -161,8 +161,10 @@ struct Gemm {
   }
 
   static bool ReuseExistingSharedLayout(String gemm_inst) {
-    (void)gemm_inst;
-    return false;
+    // SIMD-group loads can consume an explicitly laid out instruction tile.
+    // Its physical pitch is checked by the Python lowering. Cooperative tensor
+    // operations retain their existing strict layout requirements.
+    return gemm_inst == kMetalSIMDGroup;
   }
 
   static String InstructionKind(String gemm_inst) {
