@@ -18,6 +18,7 @@ GEMM_INST_MMA = "cuda.mma"
 
 
 class GemmMMA(GemmBase):
+    supports_runtime_valid_m = True
     intrin_emitter_cls = TensorCoreIntrinEmitter
 
     def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tirx.Var | None = None):
@@ -100,6 +101,7 @@ class GemmMMA(GemmBase):
         C_buf = C_region.buffer
 
         clear_accum = self.clear_accum
+        valid_m = self.runtime_valid_m
 
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
         assert block_K % micro_size_k == 0, f"block_K ({block_K}) must be a multiple of micro_size_k ({micro_size_k})"
@@ -135,7 +137,7 @@ class GemmMMA(GemmBase):
                     )
 
                     # Perform Matrix Multiplication
-                    mma_emitter.mma(A_local, B_local, C_buf, ki)
+                    mma_emitter.mma(A_local, B_local, C_buf, ki, valid_m=valid_m)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
@@ -163,7 +165,7 @@ class GemmMMA(GemmBase):
                     )
 
                     # Perform Matrix Multiplication
-                    mma_emitter.mma(A_local, B_buf, C_buf, ki)
+                    mma_emitter.mma(A_local, B_buf, C_buf, ki, valid_m=valid_m)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
@@ -192,7 +194,7 @@ class GemmMMA(GemmBase):
                     )
 
                     # Perform Matrix Multiplication
-                    mma_emitter.mma(A_buf, B_local, C_buf, ki)
+                    mma_emitter.mma(A_buf, B_local, C_buf, ki, valid_m=valid_m)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
@@ -213,7 +215,7 @@ class GemmMMA(GemmBase):
                     T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):
                     # Perform Matrix Multiplication
-                    mma_emitter.mma(A_buf, B_buf, C_buf, ki)
+                    mma_emitter.mma(A_buf, B_buf, C_buf, ki, valid_m=valid_m)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis

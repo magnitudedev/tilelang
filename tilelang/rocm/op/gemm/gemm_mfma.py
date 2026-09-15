@@ -18,6 +18,8 @@ GEMM_INST_MFMA = "rocm.mfma"
 
 
 class GemmMFMA(GemmBase):
+    supports_runtime_valid_m = True
+
     def infer_layout(self, target: Target, thread_nums: int):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MFMA)
         warp_row_tiles = int(self.M // m_warp)
@@ -113,6 +115,7 @@ class GemmMFMA(GemmBase):
         C_buf = C_region.buffer
 
         clear_accum = self.clear_accum
+        valid_m = self.runtime_valid_m
 
         assert block_K >= micro_size_k * k_pack, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k}) * k_pack ({k_pack})"
         assert block_K % (micro_size_k * k_pack) == 0, (
@@ -150,7 +153,7 @@ class GemmMFMA(GemmBase):
                     )
 
                     # Perform Matrix Multiplication
-                    mfma_emitter.mfma(A_local, B_local, C_buf, ki)
+                    mfma_emitter.mfma(A_local, B_local, C_buf, ki, valid_m=valid_m)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
@@ -179,7 +182,7 @@ class GemmMFMA(GemmBase):
                     )
 
                     # Perform Matrix Multiplication
-                    mfma_emitter.mfma(A_local, B_buf, C_buf, ki)
+                    mfma_emitter.mfma(A_local, B_buf, C_buf, ki, valid_m=valid_m)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
@@ -208,7 +211,7 @@ class GemmMFMA(GemmBase):
                     )
 
                     # Perform Matrix Multiplication
-                    mfma_emitter.mfma(A_buf, B_local, C_buf, ki)
+                    mfma_emitter.mfma(A_buf, B_local, C_buf, ki, valid_m=valid_m)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
@@ -227,7 +230,7 @@ class GemmMFMA(GemmBase):
 
                 for ki in T.serial(0, (block_K // (micro_size_k * self.k_pack))):
                     # Perform Matrix Multiplication
-                    mfma_emitter.mfma(A_buf, B_buf, C_buf, ki)
+                    mfma_emitter.mfma(A_buf, B_buf, C_buf, ki, valid_m=valid_m)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis

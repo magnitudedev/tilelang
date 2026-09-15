@@ -512,14 +512,26 @@ class TensorCoreIntrinEmitter:
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
-    def mma(self, A_local_buf: Buffer, B_local_buf: Buffer, C_local_buf: Buffer, k_inner: PrimExpr | None = 0):
+    def mma(
+        self,
+        A_local_buf: Buffer,
+        B_local_buf: Buffer,
+        C_local_buf: Buffer,
+        k_inner: PrimExpr | None = 0,
+        valid_m: PrimExpr | None = None,
+    ):
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
+        warp_row_tiles = self.warp_row_tiles
+        micro_size_x = self.micro_size_x
+        thread_binding = self.get_thread_binding()
 
         @T.macro
         def _warp_mma(A_local_buf, B_local_buf, C_local_buf):
+            _, _, warp_m = self.extract_thread_binding(thread_binding)
             for i, j in T.grid(warp_rows, warp_cols):
-                self.mma_atom(A_local_buf, B_local_buf, C_local_buf, i, j, k_inner)
+                if valid_m is None or warp_m * warp_row_tiles + i * micro_size_x < valid_m:
+                    self.mma_atom(A_local_buf, B_local_buf, C_local_buf, i, j, k_inner)
 
         return _warp_mma(A_local_buf, B_local_buf, C_local_buf)
 

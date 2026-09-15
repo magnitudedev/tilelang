@@ -13,6 +13,8 @@ GEMM_INST_SCALAR = "cpu.scalar"
 class GemmScalar(GemmBase):
     """CPU scalar fallback: triple nested loop gemm."""
 
+    supports_runtime_valid_m = True
+
     def infer_layout(self, target: Target, thread_nums: int):
         return {}
 
@@ -31,6 +33,7 @@ class GemmScalar(GemmBase):
         trans_A = self.trans_A
         trans_B = self.trans_B
         clear_accum = self.clear_accum
+        valid_m = self.valid_m
         accum_dtype = self.accum_dtype
 
         # Region offsets for strided gemm (e.g. T.gemm(A[0:64, :], B, C))
@@ -45,7 +48,7 @@ class GemmScalar(GemmBase):
         def _gemm_scalar() -> None:
             if clear_accum:
                 T.clear(C_buf)
-            for i, j, k in T.grid(M, N, K):
+            for i, j, k in T.grid(valid_m, N, K):
                 C_buf[c0 + i, c1 + j] += T.cast(
                     A_buf[a0 + (k if trans_A else i), a1 + (i if trans_A else k)],
                     accum_dtype,

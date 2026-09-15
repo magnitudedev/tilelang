@@ -468,7 +468,14 @@ class MatrixCoreIntrinEmitter:
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
-    def mfma(self, A_local_buf: Buffer, B_local_buf: Buffer, C_local_buf: Buffer, k_inner: PrimExpr | None = 0):
+    def mfma(
+        self,
+        A_local_buf: Buffer,
+        B_local_buf: Buffer,
+        C_local_buf: Buffer,
+        k_inner: PrimExpr | None = 0,
+        valid_m: PrimExpr | None = None,
+    ):
         # Import lazily to avoid a rocm.language -> rocm.intrinsics cycle.
         from tilelang.rocm.language.tir import tvm_mfma
 
@@ -488,25 +495,30 @@ class MatrixCoreIntrinEmitter:
         b_is_fragment = is_fragment(B_local_buf)
         a_local_stride: PrimExpr = k_inner * warp_rows * k_pack * local_size_a if a_is_fragment else 0
         b_local_stride: PrimExpr = k_inner * warp_cols * k_pack * local_size_b if b_is_fragment else 0
+        warp_row_tiles = self.warp_row_tiles
+        micro_size_x = self.micro_size_x
+        thread_binding = self.get_thread_binding()
 
         @T.macro
         def _warp_mfma(A_local_buf, B_local_buf, C_local_buf):
+            _, _, warp_m = self.extract_thread_binding(thread_binding)
             for kp, i, j in T.grid(k_pack, warp_rows, warp_cols):
-                tvm_mfma(
-                    mfma_suffix,
-                    "row",
-                    "row",
-                    compute_a_dtype,
-                    compute_b_dtype,
-                    compute_out_dtype,
-                    B_local_buf.data,
-                    (b_local_stride + (j * k_pack + kp) * local_size_b) // local_size_b,
-                    A_local_buf.data,
-                    (a_local_stride + (i * k_pack + kp) * local_size_a) // local_size_a,
-                    C_local_buf.data,
-                    (i * warp_cols * local_size_out + j * local_size_out) // local_size_out,
-                    dtype=compute_out_dtype,
-                )
+                if valid_m is None or warp_m * warp_row_tiles + i * micro_size_x < valid_m:
+                    tvm_mfma(
+                        mfma_suffix,
+                        "row",
+                        "row",
+                        compute_a_dtype,
+                        compute_b_dtype,
+                        compute_out_dtype,
+                        B_local_buf.data,
+                        (b_local_stride + (j * k_pack + kp) * local_size_b) // local_size_b,
+                        A_local_buf.data,
+                        (a_local_stride + (i * k_pack + kp) * local_size_a) // local_size_a,
+                        C_local_buf.data,
+                        (i * warp_cols * local_size_out + j * local_size_out) // local_size_out,
+                        dtype=compute_out_dtype,
+                    )
 
         return _warp_mfma(A_local_buf, B_local_buf, C_local_buf)
 

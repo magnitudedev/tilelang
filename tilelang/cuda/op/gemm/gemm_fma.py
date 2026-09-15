@@ -46,6 +46,8 @@ def _linear_fragment(local_buf, thread_nums: int) -> T.Fragment:
 class GemmFMA(GemmBase):
     """CUDA scalar FMA fallback for GEMM combinations without tensor-core MMA."""
 
+    supports_runtime_valid_m = True
+
     def infer_layout(self, target: Target, thread_nums: int):
         """Assign the linear fragment layout to any fragment operand."""
         layouts = {}
@@ -112,6 +114,7 @@ class GemmFMA(GemmBase):
         trans_A = self.trans_A
         trans_B = self.trans_B
         clear_accum = self.clear_accum
+        valid_m = self.valid_m
         a_dtype = self.a_dtype
         b_dtype = self.b_dtype
         accum_dtype = self.accum_dtype
@@ -137,7 +140,7 @@ class GemmFMA(GemmBase):
                 # Fragment staging is a cross-thread gather; consumers read all staged elements.
                 T.sync_threads()
 
-                for c_flat in T.serial(thread_var, M * N, thread_nums):
+                for c_flat in T.serial(thread_var, valid_m * N, thread_nums):
                     i = c_flat // N
                     j = c_flat % N
                     if clear_accum:
@@ -167,7 +170,7 @@ class GemmFMA(GemmBase):
                 # Fragment staging is a cross-thread gather; consumers read all staged elements.
                 T.sync_threads()
 
-                for c_flat in T.serial(thread_var, M * N, thread_nums):
+                for c_flat in T.serial(thread_var, valid_m * N, thread_nums):
                     i = c_flat // N
                     j = c_flat % N
                     if clear_accum:
@@ -199,7 +202,7 @@ class GemmFMA(GemmBase):
                 # Fragment staging is a cross-thread gather; consumers read all staged elements.
                 T.sync_threads()
 
-                for c_flat in T.serial(thread_var, M * N, thread_nums):
+                for c_flat in T.serial(thread_var, valid_m * N, thread_nums):
                     i = c_flat // N
                     j = c_flat % N
                     if clear_accum:
@@ -223,7 +226,7 @@ class GemmFMA(GemmBase):
                 """Accumulate C via scalar FMA."""
                 accum = T.alloc_local((1,), accum_dtype)
 
-                for c_flat in T.serial(thread_var, M * N, thread_nums):
+                for c_flat in T.serial(thread_var, valid_m * N, thread_nums):
                     i = c_flat // N
                     j = c_flat % N
                     if clear_accum:

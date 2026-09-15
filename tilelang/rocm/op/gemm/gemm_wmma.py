@@ -20,6 +20,8 @@ GEMM_INST_WMMA = "rocm.wmma"
 class GemmWMMA(GemmBase):
     """GEMM using AMD RDNA WMMA instructions (16×16×16, warp-size=32)."""
 
+    supports_runtime_valid_m = True
+
     def _make_emitter(self, target: Target, thread_nums: int, thread_var=None) -> WMMAIntrinEmitter:
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_WMMA)
         warp_row_tiles = int(self.M // m_warp)
@@ -98,6 +100,7 @@ class GemmWMMA(GemmBase):
         B_buf = B_region.buffer
         C_buf = C_region.buffer
         clear_accum = self.clear_accum
+        valid_m = self.runtime_valid_m
 
         assert block_K >= micro_size_k * k_pack
         assert block_K % (micro_size_k * k_pack) == 0
@@ -114,7 +117,7 @@ class GemmWMMA(GemmBase):
                 for ki in T.serial(0, (block_K // (micro_size_k * k_pack))):
                     wmma_emitter.ldmatrix_a(A_local, A_region, ki)
                     wmma_emitter.ldmatrix_b(B_local, B_region, ki)
-                    wmma_emitter.wmma(A_local, B_local, C_buf, ki)
+                    wmma_emitter.wmma(A_local, B_local, C_buf, ki, valid_m=valid_m)
 
             return _Simplify(_gemm_ssr, inline_let=True)
 
@@ -128,7 +131,7 @@ class GemmWMMA(GemmBase):
                     T.clear(C_buf)
                 for ki in T.serial(0, (block_K // (micro_size_k * k_pack))):
                     wmma_emitter.ldmatrix_a(A_local, A_region, ki)
-                    wmma_emitter.wmma(A_local, B_buf, C_buf, ki)
+                    wmma_emitter.wmma(A_local, B_buf, C_buf, ki, valid_m=valid_m)
 
             return _Simplify(_gemm_srr, inline_let=True)
 
@@ -142,7 +145,7 @@ class GemmWMMA(GemmBase):
                     T.clear(C_buf)
                 for ki in T.serial(0, (block_K // (micro_size_k * k_pack))):
                     wmma_emitter.ldmatrix_b(B_local, B_region, ki)
-                    wmma_emitter.wmma(A_buf, B_local, C_buf, ki)
+                    wmma_emitter.wmma(A_buf, B_local, C_buf, ki, valid_m=valid_m)
 
             return _Simplify(_gemm_rsr, inline_let=True)
 
@@ -153,7 +156,7 @@ class GemmWMMA(GemmBase):
             @T.prim_func
             def _gemm_rrr() -> None:
                 for ki in T.serial(0, (block_K // (micro_size_k * self.k_pack))):
-                    wmma_emitter.wmma(A_buf, B_buf, C_buf, ki)
+                    wmma_emitter.wmma(A_buf, B_buf, C_buf, ki, valid_m=valid_m)
 
             return _Simplify(_gemm_rrr, inline_let=True)
 

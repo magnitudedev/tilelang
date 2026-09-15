@@ -11,6 +11,7 @@ from tilelang.tileop.base import GemmWarpPolicy
 from tilelang.language.dtypes import validate_gemm_ab_dtypes
 from tvm.ir.base import Node
 from tvm.ir import PrimExpr
+from tvm import arith
 
 
 @dataclass
@@ -140,6 +141,13 @@ class GemmBase:
     @property
     def valid_m(self) -> PrimExpr:
         return getattr(self.gemm_node, "validM", tvm.tirx.const(self.M, T.int32))
+
+    @property
+    def runtime_valid_m(self) -> PrimExpr | None:
+        """Return the dynamic M prefix, or ``None`` for a proven full tile."""
+        if arith.Analyzer().can_prove_equal(self.valid_m, self.M):
+            return None
+        return self.valid_m
 
     @property
     def k_pack(self) -> int:
