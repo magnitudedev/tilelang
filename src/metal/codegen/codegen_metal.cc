@@ -720,7 +720,6 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
   TVM_FFI_ICHECK(op->buffer.defined());
   std::string vid = AllocVarID(op->buffer->data.get());
 
-  this->PrintIndent();
   size_t constant_size = 1;
   for (const auto &dim : op->buffer->shape) {
     const IntImmNode *dim_imm = dim.as<IntImmNode>();
@@ -734,6 +733,21 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
   DataType dtype = op->buffer->dtype;
   auto scope = GetPtrStorageScope(op->buffer->data);
   alloc_storage_scope_[op->buffer->data.get()] = scope;
+  std::string scalar_init;
+  if (scope == "local.var") {
+    PrimExpr init = tirx::make_const(dtype, 0);
+    auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
+    if (init_it != op->annotations.end()) {
+      init = Downcast<PrimExpr>((*init_it).second);
+      if (!init.dtype().is_void() && init.dtype() != dtype) {
+        init = tirx::Cast(dtype, init);
+      }
+    }
+    // Expression printing may emit prerequisite statements (e.g. a lazy
+    // conditional load). Finish those before starting the declaration.
+    scalar_init = PrintExpr(init);
+  }
+  this->PrintIndent();
   if (scope == "metal.cooperative_tensor") {
     uses_cooperative_tensor_ = true;
     TVM_FFI_ICHECK(dtype == DataType::Float(16) ||
@@ -818,17 +832,7 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
     PrintStorageScope(scope, stream);
     PrintType(dtype, stream);
     if (scope == "local.var") {
-      PrimExpr init = tirx::make_const(op->buffer->dtype, 0);
-      auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
-      if (init_it != op->annotations.end()) {
-        PrimExpr user_init = Downcast<PrimExpr>((*init_it).second);
-        if (!user_init.dtype().is_void() &&
-            user_init.dtype() != op->buffer->dtype) {
-          user_init = tirx::Cast(op->buffer->dtype, user_init);
-        }
-        init = user_init;
-      }
-      stream << ' ' << vid << " = " << PrintExpr(init) << ";\n";
+      stream << ' ' << vid << " = " << scalar_init << ";\n";
     } else {
       stream << ' ' << vid << '[' << constant_size << "];\n";
     }
@@ -887,9 +891,9 @@ void CodeGenTileLangMetal::VisitStmt_(const BufferStoreNode *op) {
         << "Store to non-flat local.var not supported.";
     TVM_FFI_ICHECK(!op->predicate.defined())
         << "Predicated local.var store is not supported.";
+    const std::string value = PrintExpr(op->value);
     PrintIndent();
-    stream << GetVarID(op->buffer->data.get()) << " = " << PrintExpr(op->value)
-           << ";\n";
+    stream << GetVarID(op->buffer->data.get()) << " = " << value << ";\n";
     return;
   }
   if (simdgroup_fragments_.count(op->buffer->data)) {
