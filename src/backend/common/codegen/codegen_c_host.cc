@@ -55,6 +55,7 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts,
   decl_stream << "#ifdef __OBJC__\n";
   decl_stream << "#include \"tvm/runtime/device_api.h\"\n";
   decl_stream << "#include \"tvm/ffi/function.h\"\n";
+  decl_stream << "#include \"tvm/ffi/extra/module.h\"\n";
 
   decl_stream << "#include <Metal/Metal.h>\n";
   decl_stream << "#include <Foundation/Foundation.h>\n";
@@ -458,7 +459,8 @@ void CodeGenCHost::VisitStmt_(const tvm::tirx::AttrStmtNode *op) {
   const auto owner = name_supply_->FreshName("submitting_thread");
   const auto queue = name_supply_->FreshName("serial_queue");
   const auto buffer = name_supply_->FreshName("command_buffer");
-  const auto set_stream = name_supply_->FreshName("set_stream");
+  const auto begin_program = name_supply_->FreshName("begin_program");
+  const auto program_scope = name_supply_->FreshName("program_scope");
   PrintLine("__block int ", result, " = 0;");
   PrintLine("__block TVMFFIObjectHandle ", error, " = NULL;");
   PrintLine("std::exception_ptr ", exception, ";");
@@ -474,10 +476,11 @@ void CodeGenCHost::VisitStmt_(const tvm::tirx::AttrStmtNode *op) {
   const int try_scope = BeginScope();
   PrintLine("const id<MTLCommandBuffer> ", buffer,
             " = torch::mps::get_command_buffer();");
-  PrintLine("const auto ", set_stream,
-            " = tvm::ffi::Function::GetGlobal(\"metal.SetStream\");");
-  PrintLine("(*", set_stream, ")(static_cast<TVMStreamHandle>(", buffer,
-            "), ", owner, ");");
+  PrintLine("const auto ", begin_program,
+            " = tvm::ffi::Function::GetGlobal(\"metal.BeginProgram\");");
+  PrintLine("const tvm::ffi::Module ", program_scope, " = (*", begin_program,
+            ")(static_cast<TVMStreamHandle>(", buffer,
+            "), ", owner, ").cast<tvm::ffi::Module>();");
   PrintStmt(op->body);
   PrintLine("return 0;");
   EndScope(try_scope);

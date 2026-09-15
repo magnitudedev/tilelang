@@ -1,4 +1,4 @@
-"""Each device launch uses a queue handoff, never arbitrary host effects."""
+"""Ordered device regions share a handoff; host effects stay outside."""
 
 import pytest
 
@@ -41,11 +41,11 @@ def test_device_region_preserves_loops_branches_and_attributes():
     marked = _marked(body)
     assert marked.attr_key == "preserved_outer_annotation"
     contexts = _contexts(marked)
-    assert len(contexts) == 2
-    assert [context.body.value.args[0].value for context in contexts] == ["first", "second"]
+    assert len(contexts) == 1
     assert marked.body.attr_key == "compute_scope"
-    assert marked.body.body.attr_key == "preserved_inner_annotation"
-    assert isinstance(marked.body.body.body, tirx.For)
+    assert contexts[0].body.attr_key == "preserved_inner_annotation"
+    assert isinstance(contexts[0].body.body, tirx.For)
+    assert isinstance(contexts[0].body.body.body, tirx.SeqStmt)
 
 
 @pytest.mark.parametrize("effect", ["callback", "return", "external"])
@@ -141,15 +141,16 @@ def conditional_program():
     return main
 
 
-def test_lowered_composed_host_has_one_handoff_per_launch():
+def test_lowered_composed_host_has_one_scoped_handoff():
     target = tvm.target.Target("metal", tvm.target.Target("c"))
     with target, tvm.transform.PassContext():
         artifact = tilelang.lower(
             conditional_program(), target=target, target_host="c", enable_host_codegen=True, enable_device_compile=False
         )
     source = artifact.host_mod.inspect_source()
-    assert source.count("dispatch_sync(") == 3
-    assert source.count('GetGlobal("metal.SetStream")') == 3
+    assert source.count("dispatch_sync(") == 1
+    assert source.count('GetGlobal("metal.BeginProgram")') == 1
+    assert ".cast<tvm::ffi::Module>()" in source
     assert "[&]() noexcept -> int" in source
     assert "std::rethrow_exception" in source
     assert "TVMFFIErrorMoveFromRaised" in source
@@ -192,3 +193,36 @@ def test_dynamic_submission_and_partial_failure_preserve_order():
             torch.testing.assert_close(output.cpu(), (torch.arange(256) + 1) * factor, check_dtype=False)
         finally:
             active.close()
+
+
+@tilelang.testing.requires_metal
+def test_composed_pass_finishes_before_next_host_operation():
+    import torch
+
+    kernel = tilelang.compile(conditional_program(), target="metal", execution_backend="tvm_ffi", out_idx=[])
+    source = torch.arange(256, dtype=torch.float32, device="mps")
+    middle, branch, output = (torch.empty_like(source) for _ in range(3))
+    bound = kernel.bind({0: source, 1: middle, 2: branch, 3: output}, (4,))
+    for enabled, factor in ((1, 6), (0, 2), (1, 6)):
+        bound(enabled)
+        # This copy begins another encoder on Torch's command buffer. The
+        # program must already have closed its own pass without committing it.
+        copied = output.clone()
+        torch.mps.synchronize()
+        torch.testing.assert_close(copied.cpu(), (torch.arange(256) + 1) * factor,
+                                   check_dtype=False)
+
+
+def test_host_callback_splits_contiguous_launch_groups():
+    def body(stack, _):
+        return tirx.SeqStmt([_call("first", stack), _call("second", stack),
+                             _call("host_callback", stack),
+                             _call("first", stack), _call("second", stack)])
+
+    marked = _marked(body)
+    contexts = _contexts(marked)
+    assert len(contexts) == 2
+    assert all(isinstance(context.body, tirx.SeqStmt) and len(context.body.seq) == 2
+               for context in contexts)
+    sequence = marked.body.body
+    assert sequence.seq[1].value.args[0].value == "host_callback"
