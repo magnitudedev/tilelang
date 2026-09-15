@@ -114,3 +114,15 @@ def test_partial_cross_simd_reduce_rejected():
     program = reduce_kernel.get_tir(1, 64, 128, "sum", strided=True)
     with tvm.target.Target("metal"), pytest.raises(tvm.error.InternalError, match="require all block threads"):
         tilelang.lower(program, target="metal")
+
+
+@tilelang.testing.requires_metal
+def test_multiple_reduction_kernels_share_helper_definitions():
+    sources = []
+    program = reduce_kernel.get_tir(1, 128, 128, "sum")
+    for name in ("reduce_first", "reduce_second"):
+        with tvm.target.Target("metal"):
+            sources.append(tilelang.lower(program.with_attr("global_symbol", name), target="metal").kernel_source)
+    library = torch.mps.compile_shader("\n".join(sources))
+    assert library.reduce_first_kernel is not None
+    assert library.reduce_second_kernel is not None

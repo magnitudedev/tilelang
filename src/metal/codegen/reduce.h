@@ -9,6 +9,8 @@ namespace tvm {
 namespace codegen {
 
 constexpr const char *kMetalReduceSource = R"(
+#ifndef TILELANG_METAL_REDUCE_DEFINED
+#define TILELANG_METAL_REDUCE_DEFINED
 namespace tl {
 struct SumOp {
   template <typename T> T operator()(T x, T y) const { return x + y; }
@@ -71,6 +73,7 @@ struct AllReduce {
   }
 };
 } // namespace tl
+#endif
 )";
 
 } // namespace codegen
