@@ -402,6 +402,32 @@ struct ConstrSet {
     return out;
   }
 
+  void PopulateBatched(arith::Analyzer &analyzer) const {
+    PrimExpr pending;
+    auto flush = [&]() {
+      if (pending.defined()) {
+        Constr(pending).Populate(analyzer);
+        pending = PrimExpr();
+      }
+    };
+    for (const Constr &constraint : constrs_) {
+      // These are already predicates, not program-order Bind operations.
+      // One conjunction has exactly the same premises but needs one solver
+      // push instead of re-internalizing every prior assertion at every push.
+      // Keep mutable reads separate: the prover snapshots them per constraint
+      // scope, so combining them could invent equality across evaluations.
+      if (constraint.kind == Constr::kConstr && !constraint.is_assume &&
+          tirx::SideEffect(constraint.value) <= tirx::CallEffectKind::kPure) {
+        pending = pending.defined() ? tirx::And(pending, constraint.value)
+                                    : constraint.value;
+      } else {
+        flush();
+        constraint.Populate(analyzer);
+      }
+    }
+    flush();
+  }
+
   void Populate(arith::Analyzer &analyzer) const {
     // Keep program order: `Analyzer::Bind` evaluates the bounds and modular set
     // of the value at bind time, so entering the binds first would widen them

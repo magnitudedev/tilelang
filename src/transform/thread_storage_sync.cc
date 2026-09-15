@@ -239,6 +239,14 @@ private:
 
 namespace {
 
+Var FindThreadAxis(const Array<IterVar> &threads, const std::string &tag) {
+  for (const auto &iv : threads) {
+    if (iv->thread_tag == tag)
+      return iv->var;
+  }
+  return Var();
+}
+
 PrimExpr MakeLinearThreadId(const Array<IterVar> &thread_vars) {
   DataType index_dtype = DataType::Int(64);
   PrimExpr linear_thread_id = make_const(index_dtype, 0);
@@ -759,7 +767,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     ConstrSet c2 =
         cset.RenameFrom("<T2>", sub2, std::nullopt, /*rename_ranges=*/false);
     arith::Analyzer analyzer;
-    c1.ToConstraints().Merge(c2.ToConstraints()).Populate(analyzer);
+    c1.ToConstraints().Merge(c2.ToConstraints()).PopulateBatched(analyzer);
     PrimExpr lhs = Substitute(condition, sub1);
     PrimExpr rhs = Substitute(condition, sub2);
     // Spelled out rather than as an equality so that it stays a boolean query.
@@ -790,7 +798,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     ConstrSet c2 =
         cset.RenameFrom("<T2>", sub2, std::nullopt, /*rename_ranges=*/false);
     arith::Analyzer analyzer;
-    c1.ToConstraints().Merge(c2.ToConstraints()).Populate(analyzer);
+    c1.ToConstraints().Merge(c2.ToConstraints()).PopulateBatched(analyzer);
 
     PrimExpr lhs = Substitute(condition, sub1);
     PrimExpr rhs = Substitute(condition, sub2);
@@ -926,12 +934,33 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   }
 
   void VisitStmt_(const ForNode *op) final {
+    // Bounds are reads evaluated before entering the loop. Like if/while
+    // conditions, they must participate in dependency analysis even when the
+    // body itself contains no shared-memory access. Visiting them through the
+    // ordinary constrained visitor left allow_append_ false and rejected valid
+    // shared-memory loop bounds.
+    ICHECK(curr_stmt_.access.empty());
+    allow_append_ = true;
+    this->VisitExpr(op->min);
+    this->VisitExpr(op->extent);
+    if (op->step.has_value()) {
+      this->VisitExpr(*op->step);
+    }
+    std::vector<AccessEntry> bound_access = std::move(curr_stmt_.access);
+    curr_stmt_.access.clear();
+    allow_append_ = false;
     scope_.push_back(std::vector<StmtEntry>());
-    ConstrVisitor::VisitStmt_(op);
+    {
+      auto range_guard =
+          MakeGuard(op->loop_var, Range::FromMinExtent(op->min, op->extent));
+      auto extent_guard = MakeGuard(op->extent > 0);
+      this->VisitStmt(op->body);
+    }
     StmtEntry s;
     s.stmt = op;
     s.access = Summarize(std::move(scope_.back()), op);
     scope_.pop_back();
+    s.access.insert(s.access.begin(), bound_access.begin(), bound_access.end());
     if (!s.access.empty()) {
       // relax the touched set to contain all ranges in the loop.
       std::unordered_map<const VarNode *, arith::IntSet> relax_map;
@@ -1619,10 +1648,13 @@ private:
     Map<Var, PrimExpr> prev_sub, curr_sub;
     for (unsigned idx = 0; idx != 3; ++idx) {
       auto &info = thread_vars[idx];
-      Var old_prev_var = lhs.threads[lhs.threads.size() + idx - 3]->var;
-      Var old_curr_var = rhs.threads[rhs.threads.size() + idx - 3]->var;
-      prev_sub.Set(old_prev_var, Var(info.name_prev, old_prev_var.dtype()));
-      curr_sub.Set(old_curr_var, Var(info.name_curr, old_curr_var.dtype()));
+      std::string tag = std::string("threadIdx.") + "xyz"[idx];
+      Var old_prev_var = FindThreadAxis(lhs.threads, tag);
+      Var old_curr_var = FindThreadAxis(rhs.threads, tag);
+      if (old_prev_var.defined())
+        prev_sub.Set(old_prev_var, Var(info.name_prev, old_prev_var.dtype()));
+      if (old_curr_var.defined())
+        curr_sub.Set(old_curr_var, Var(info.name_curr, old_curr_var.dtype()));
     }
     // Two threads here as well, so every per-thread bind needs its own copy;
     // sharing one would force the two thread variables to agree. Ranges stay
@@ -1639,7 +1671,7 @@ private:
     // values on the two sides does not trip the analyzer's re-bind check.
     prev_cset.ToConstraints()
         .Merge(curr_cset.ToConstraints())
-        .Populate(analyzer);
+        .PopulateBatched(analyzer);
 
     if (analyzer.CanProve(lhs_max < rhs_min,
                           arith::ProofStrength::kSymbolicBound)) {
@@ -1837,6 +1869,11 @@ private:
       PrimExpr prev_constr = prev.cset.ToConjunction();
       PrimExpr curr_constr = curr.cset.ToConjunction();
 
+      if (SideEffect(prev_constr) <= CallEffectKind::kPure &&
+          ExprDeepEqual()(prev_constr, curr_constr)) {
+        return false;
+      }
+
       arith::Analyzer analyzer;
       for (const auto &iv : prev.threads) {
         if (iv->dom.defined()) {
@@ -1921,25 +1958,37 @@ private:
 
       const char *thread_names[] = {"tx", "ty", "tz"};
       for (unsigned idx = 0; idx != 3; ++idx) {
-        Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
-        Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
+        // Thread axes can be absent, reordered, or preceded by block axes.
+        // Match their semantic tag rather than indexing the last three entries.
+        std::string tag = std::string("threadIdx.") + "xyz"[idx];
+        Var old_prev_var = FindThreadAxis(prev.threads, tag);
+        Var old_curr_var = FindThreadAxis(curr.threads, tag);
+        if (!old_prev_var.defined() && !old_curr_var.defined())
+          continue;
+        DataType dtype = old_prev_var.defined() ? old_prev_var.dtype()
+                                                : old_curr_var.dtype();
 
         if (same_access_type) {
           // For WAW/RAR: use a single shared Var object for both prev and curr
           // This allows the analyzer to see they reference the same thread
-          Var shared_var(thread_names[idx], old_prev_var.dtype());
-          prev_sub.Set(old_prev_var, shared_var);
-          curr_sub.Set(old_curr_var, shared_var);
+          Var shared_var(thread_names[idx], dtype);
+          if (old_prev_var.defined())
+            prev_sub.Set(old_prev_var, shared_var);
+          if (old_curr_var.defined())
+            curr_sub.Set(old_curr_var, shared_var);
         } else {
           // For RAW/WAR: use different Var objects to model cross-thread access
-          Var prev_var(std::string(thread_names[idx]) + "1",
-                       old_prev_var.dtype());
-          Var curr_var(std::string(thread_names[idx]) + "2",
-                       old_curr_var.dtype());
+          PrimExpr prev_var = make_zero(dtype), curr_var = make_zero(dtype);
+          if (old_prev_var.defined()) {
+            prev_var = Var(std::string(thread_names[idx]) + "1", dtype);
+            prev_sub.Set(old_prev_var, prev_var);
+          }
+          if (old_curr_var.defined()) {
+            curr_var = Var(std::string(thread_names[idx]) + "2", dtype);
+            curr_sub.Set(old_curr_var, curr_var);
+          }
           thread_condition =
               tirx::Or(thread_condition, tirx::NE(prev_var, curr_var));
-          prev_sub.Set(old_prev_var, prev_var);
-          curr_sub.Set(old_curr_var, curr_var);
         }
       }
       if (!same_access_type) {
@@ -1964,7 +2013,7 @@ private:
       // full range, so keeping the binds would trip the re-bind check.
       prev_cset.ToConstraints()
           .Merge(curr_cset.ToConstraints())
-          .Populate(analyzer);
+          .PopulateBatched(analyzer);
       bool provably_disjoint = false;
 
       prev_indice_bytes =
