@@ -60,6 +60,8 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts,
   decl_stream << "#include <Foundation/Foundation.h>\n";
 
   decl_stream << "#include <torch/mps.h>\n";
+  decl_stream << "#include <pthread.h>\n";
+  decl_stream << "#include <exception>\n";
   decl_stream << "#endif\n";
 
   CodeGenCHost::InitGlobalContext();
@@ -272,9 +274,6 @@ void CodeGenCHost::PrintCallPacked(const tvm::tirx::CallNode *op) {
   std::string args_stack = PrintExpr(op->args[1]);
   this->PrintIndent();
   std::string result = name_supply_->FreshName("result");
-  if (is_in_metal_context) {
-    this->stream << "__block ";
-  }
   this->stream << "TVMFFIAny " << result << ";\n";
   this->PrintIndent();
   // must make sure type_index is set to none
@@ -283,26 +282,6 @@ void CodeGenCHost::PrintCallPacked(const tvm::tirx::CallNode *op) {
   this->stream << result << ".zero_padding = 0;\n";
   this->PrintIndent();
   this->stream << result << ".v_int64 = 0;\n";
-
-  int metal_scope;
-  std::string metal_result;
-  if (is_in_metal_context) {
-    metal_result = name_supply_->FreshName("metal_ret");
-    std::string serial_queue = name_supply_->FreshName("serial_queue");
-    std::string command_buffer = name_supply_->FreshName("command_buffer");
-    std::string set_stream = name_supply_->FreshName("set_stream");
-    this->PrintLine("__block int ", metal_result, " = 0;");
-    this->PrintLine("auto ", serial_queue, " = torch::mps::get_dispatch_queue();");
-    this->PrintLine("dispatch_sync(", serial_queue, ", ^() {");
-    metal_scope = this->BeginScope();
-
-    this->PrintLine("const id<MTLCommandBuffer> ", command_buffer,
-                    " = torch::mps::get_command_buffer();");
-    this->PrintLine("const auto ", set_stream,
-                    " = tvm::ffi::Function::GetGlobal(\"metal.SetStream\");");
-    this->PrintLine("(*", set_stream, ")(static_cast<TVMStreamHandle>(",
-                    command_buffer, "));");
-  }
 
   this->PrintIndent();
   if (op->op.same_as(builtin::tvm_call_packed_lowered())) {
@@ -313,20 +292,10 @@ void CodeGenCHost::PrintCallPacked(const tvm::tirx::CallNode *op) {
   this->stream << "(TVMFFIAny*) " << args_stack << ", " << num_args << ", "
                << "&" << result << ") != 0) {\n";
   int func_call_scope = this->BeginScope();
-  if (is_in_metal_context) {
-    this->PrintLine(metal_result, " = -1;");
-  } else {
-    this->PrintLine("return -1;");
-  }
+  this->PrintLine("return -1;");
   this->EndScope(func_call_scope);
 
   this->PrintLine("}");
-
-  if (is_in_metal_context) {
-    this->EndScope(metal_scope);
-    this->PrintLine("});");
-    this->PrintLine("if (", metal_result, " != 0) return ", metal_result, ";");
-  }
 }
 
 std::string CodeGenCHost::GetPackedName(const tvm::tirx::CallNode *op) {
@@ -475,15 +444,66 @@ void CodeGenCHost::VisitStmt_(
 }
 
 void CodeGenCHost::VisitStmt_(const tvm::tirx::AttrStmtNode *op) {
-  bool enter_metal_ctx = op->attr_key == "metal_context";
-  if (enter_metal_ctx) {
-    ICHECK(!is_in_metal_context) << "Nested metal context";
-    is_in_metal_context = true;
+  if (op->attr_key != "metal_context") {
+    tvm::codegen::CodeGenC::VisitStmt_(op);
+    return;
   }
-  tvm::codegen::CodeGenC::VisitStmt_(op);
-  if (enter_metal_ctx) {
-    is_in_metal_context = false;
-  }
+  ICHECK(!is_in_metal_context) << "Nested metal context";
+  is_in_metal_context = true;
+  const auto result = name_supply_->FreshName("metal_ret");
+  const auto error = name_supply_->FreshName("metal_error");
+  const auto exception = name_supply_->FreshName("metal_exception");
+  const auto exception_ref = name_supply_->FreshName("metal_exception_ref");
+  const auto submit = name_supply_->FreshName("metal_submit");
+  const auto owner = name_supply_->FreshName("submitting_thread");
+  const auto queue = name_supply_->FreshName("serial_queue");
+  const auto buffer = name_supply_->FreshName("command_buffer");
+  const auto set_stream = name_supply_->FreshName("set_stream");
+  PrintLine("__block int ", result, " = 0;");
+  PrintLine("__block TVMFFIObjectHandle ", error, " = NULL;");
+  PrintLine("std::exception_ptr ", exception, ";");
+  PrintLine("const std::exception_ptr* ", exception_ref, " = &", exception, ";");
+  PrintLine("const uint64_t ", owner,
+            " = reinterpret_cast<uintptr_t>(pthread_self());");
+  PrintLine("auto ", queue, " = torch::mps::get_dispatch_queue();");
+  // Reference captures preserve mutable argument stacks without copying C
+  // arrays into an Objective-C block. All references outlive dispatch_sync.
+  PrintLine("auto ", submit, " = [&]() noexcept -> int {");
+  const int submit_scope = BeginScope();
+  PrintLine("try {");
+  const int try_scope = BeginScope();
+  PrintLine("const id<MTLCommandBuffer> ", buffer,
+            " = torch::mps::get_command_buffer();");
+  PrintLine("const auto ", set_stream,
+            " = tvm::ffi::Function::GetGlobal(\"metal.SetStream\");");
+  PrintLine("(*", set_stream, ")(static_cast<TVMStreamHandle>(", buffer,
+            "), ", owner, ");");
+  PrintStmt(op->body);
+  PrintLine("return 0;");
+  EndScope(try_scope);
+  PrintLine("} catch (...) {");
+  PrintLine("  ", exception, " = std::current_exception();");
+  PrintLine("  return -1;");
+  PrintLine("}");
+  EndScope(submit_scope);
+  PrintLine("};");
+  PrintLine("dispatch_sync(", queue, ", ^() {");
+  PrintLine("  ", result, " = ", submit, "();");
+  // Read the exception through the reference-capturing callable's owner, not
+  // a stale value copy captured when the Objective-C block was created.
+  PrintLine("  if (", result, " != 0 && !*", exception_ref,
+            ") TVMFFIErrorMoveFromRaised(&", error, ");");
+  PrintLine("});");
+  PrintLine("if (", exception, ") {");
+  PrintLine("  if (", error, ") TVMFFIObjectDecRef(", error, ");");
+  PrintLine("  std::rethrow_exception(", exception, ");");
+  PrintLine("}");
+  PrintLine("if (", result, " != 0) {");
+  PrintLine("  TVMFFIErrorSetRaised(", error, ");");
+  PrintLine("  TVMFFIObjectDecRef(", error, ");");
+  PrintLine("  return ", result, ";");
+  PrintLine("}");
+  is_in_metal_context = false;
 }
 
 void CodeGenCHost::VisitExpr_(const tvm::tirx::MinNode *op,

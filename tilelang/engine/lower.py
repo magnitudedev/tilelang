@@ -161,6 +161,11 @@ def lower_to_host_device_ir(
 
             host_mod = tirx.transform.Filter(_is_host_call)(mod)
             device_mod = tirx.transform.Filter(_is_device_call)(mod)
+            # Distinguish extracted device launches from packed host callbacks
+            # after the device functions are removed from the host module.
+            host_mod = host_mod.with_attr(
+                "tl.device_kernel_symbols", sorted(str(func.attrs["global_symbol"]) for func in device_mod.functions.values())
+            )
 
             return host_mod, device_mod, params, target, target_host
 
