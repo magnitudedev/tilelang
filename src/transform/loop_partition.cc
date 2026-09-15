@@ -42,7 +42,8 @@ using namespace ffi;
 
 class BufferIndiceSimplify : public StmtExprMutator {
 public:
-  BufferIndiceSimplify(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
+  BufferIndiceSimplify(arith::Analyzer *analyzer, Map<Var, PrimExpr> remap)
+      : analyzer_(analyzer), remap_(std::move(remap)) {}
 
 private:
   PrimExpr VisitExpr_(const BufferLoadNode *node) final {
@@ -50,7 +51,12 @@ private:
     auto n = Downcast<BufferLoad>(visited);
     auto nptr = n.CopyOnWrite();
     nptr->indices = nptr->indices.Map(
-        [&](const auto &e) { return analyzer_->Simplify(e); });
+        [&](const auto &e) {
+          // Analyzer bindings were collected before partitioning. Expanding
+          // a let-bound gather index can reintroduce an eliminated iterator;
+          // translate that expansion into the same physical coordinates.
+          return Substitute(analyzer_->Simplify(e), remap_);
+        });
     return n;
   }
   Stmt VisitStmt_(const BufferStoreNode *node) final {
@@ -58,10 +64,16 @@ private:
     auto n = Downcast<BufferStore>(visited);
     auto nptr = n.CopyOnWrite();
     nptr->indices = nptr->indices.Map(
-        [&](const auto &e) { return analyzer_->Simplify(e); });
+        [&](const auto &e) {
+          // Analyzer bindings were collected before partitioning. Expanding
+          // a let-bound gather index can reintroduce an eliminated iterator;
+          // translate that expansion into the same physical coordinates.
+          return Substitute(analyzer_->Simplify(e), remap_);
+        });
     return n;
   }
   arith::Analyzer *analyzer_;
+  Map<Var, PrimExpr> remap_;
 };
 
 // Lower generic `tl.parallel_multiplicity` markers: the marked side effect
@@ -205,7 +217,7 @@ For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
     analyzer->Bind(vars[i], Range(0, inv_loop->InputShape()[i]));
   }
 
-  body = BufferIndiceSimplify(analyzer)(body);
+  body = BufferIndiceSimplify(analyzer, vmap)(body);
 
   return Downcast<For>(body);
 }
