@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <iomanip>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -1897,7 +1899,10 @@ void CodeGenTileLangMetal::VisitExpr_(const FloatImmNode *op,
   } else if (std::isnan(op->value)) {
     temp << "NAN";
   } else {
-    temp << std::scientific << op->value;
+    // A FloatImm must survive source serialization without changing its value.
+    temp << std::scientific
+         << std::setprecision(std::numeric_limits<double>::max_digits10 - 1)
+         << op->value;
     if (op->dtype.bits() == 32 || op->dtype.is_bfloat16())
       temp << 'f';
     else if (op->dtype.bits() == 16)
