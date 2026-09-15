@@ -413,6 +413,7 @@ MakePackedAPI(PrimFunc func,
   } else {
     return func;
   }
+  const bool emit_host_storage_alignment = target_host->kind->name == "llvm";
 
   auto *func_ptr = func.CopyOnWrite();
   std::vector<AssumeRuntimeCheck> assume_runtime_checks;
@@ -621,14 +622,12 @@ MakePackedAPI(PrimFunc func,
     PrimExpr arg_value;
     // type index checks
     Var type_index(param->name_hint + ".type_index", DataType::Int(32));
-    seq_init.push_back(SeqStmt(
-        {tirx::Bind(
-             type_index,
-             tirx::Call(
-                 DataType::Int(32), builtin::tvm_struct_get(),
-                 {v_packed_args, IntImm(DataType::Int(32), packed_arg_index),
-                  IntImm(DataType::Int(32), builtin::kTVMFFIAnyTypeIndex)})),
-         nop}));
+    seq_init.push_back(tirx::Bind(
+        type_index,
+        tirx::Call(
+            DataType::Int(32), builtin::tvm_struct_get(),
+            {v_packed_args, IntImm(DataType::Int(32), packed_arg_index),
+             IntImm(DataType::Int(32), builtin::kTVMFFIAnyTypeIndex)})));
     DataType dtype = param.dtype();
     if (dtype.is_handle()) {
       std::ostringstream msg;
@@ -721,14 +720,12 @@ MakePackedAPI(PrimFunc func,
   if (use_callee_allocated_output_abi) {
     const int anchor_index = packed_arg_index++;
     Var anchor_type_index("allocator_anchor.type_index", DataType::Int(32));
-    seq_init.push_back(SeqStmt(
-        {tirx::Bind(
-             anchor_type_index,
-             tirx::Call(
-                 DataType::Int(32), builtin::tvm_struct_get(),
-                 {v_packed_args, IntImm(DataType::Int(32), anchor_index),
-                  IntImm(DataType::Int(32), builtin::kTVMFFIAnyTypeIndex)})),
-         nop}));
+    seq_init.push_back(tirx::Bind(
+        anchor_type_index,
+        tirx::Call(
+            DataType::Int(32), builtin::tvm_struct_get(),
+            {v_packed_args, IntImm(DataType::Int(32), anchor_index),
+             IntImm(DataType::Int(32), builtin::kTVMFFIAnyTypeIndex)})));
     seq_init.emplace_back(AssertStmt(
         anchor_type_index == TypeIndex::kTVMFFITensor,
         StringImm("RuntimeError"),
@@ -775,7 +772,8 @@ MakePackedAPI(PrimFunc func,
   }
 
   binder.BindDLTensors(buffer_def, device_type, device_id, name_hint,
-                       used_param_buffers, detector.used_shape_vars);
+                       used_param_buffers, detector.used_shape_vars,
+                       emit_host_storage_alignment);
   for (const auto &[var, buffer] : buffer_def) {
     // Prefer buffer data var name in diagnostics to avoid exposing low-level
     // handle vars
@@ -963,7 +961,8 @@ MakePackedAPI(PrimFunc func,
 
     output_binder.BindDLTensors(output_buffer_def, device_type, device_id,
                                 name_hint, used_output_buffers,
-                                output_shape_vars);
+                                output_shape_vars,
+                                emit_host_storage_alignment);
 
     if (num_outputs == 1) {
       callee_allocated_output_return.push_back(StoreFFIAny(

@@ -197,6 +197,20 @@ def test_optimizer_only_assume_is_not_lowered_to_assert():
     assert not [stmt for stmt in _collect_nodes(after.body, tirx.AssertStmt) if any(part.value == message for part in stmt.message_parts)]
 
 
+def test_large_packed_signature_remains_flat_through_builtin_lowering():
+    """Bodyless argument binds must not become a recursion-depth-sized nest."""
+
+    params = [tirx.Var(f"p{i}", "int32") for i in range(2500)]
+    before = tirx.PrimFunc(params, tirx.Evaluate(params[0]))
+    before = before.with_attr("global_symbol", "main")
+    before = before.with_attr("target", tvm.target.Target("cuda", host="c"))
+
+    packed = tilelang.transform.MakePackedAPI()(tvm.IRModule.from_expr(before))
+    lowered = tirx.transform.LowerTVMBuiltin()(packed)
+
+    assert len(lowered["main"].params) == 4
+
+
 def test_subroutine_call_to_externally_visible_subroutine():
     """Externally-visible subroutines should use the PackedFunc API
 

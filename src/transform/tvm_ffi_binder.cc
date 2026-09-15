@@ -105,7 +105,7 @@ bool TVMFFIABIBuilder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
     defs_.emplace_back(v_arg);
     if (with_lets) {
       (*def_map_)[v] = value;
-      init_nest_.emplace_back(SeqStmt({tirx::Bind(v_arg, value), Evaluate(0)}));
+      init_nest_.emplace_back(tirx::Bind(v_arg, value));
     } else {
       (*def_map_)[v] = value;
     }
@@ -168,8 +168,7 @@ bool TVMFFIABIBuilder::Bind_(const PrimExpr &arg, const PrimExpr &value,
       defs_.emplace_back(v_arg);
       if (with_lets) {
         (*def_map_)[v] = arg;
-        init_nest_.emplace_back(
-            SeqStmt({tirx::Bind(v_arg, value), Evaluate(0)}));
+        init_nest_.emplace_back(tirx::Bind(v_arg, value));
       } else {
         (*def_map_)[v] = value;
       }
@@ -332,7 +331,8 @@ void TVMFFIABIBuilder::BindDLTensors(
     const PrimExpr &device_type, const PrimExpr &device_id,
     const std::string &func_name,
     const std::unordered_set<const VarNode *> &used_param_buffers,
-    const std::unordered_set<const VarNode *> &used_shape_vars) {
+    const std::unordered_set<const VarNode *> &used_shape_vars,
+    bool emit_storage_alignment) {
   Array<Buffer> buffers;
   Array<Var> handles;
 
@@ -378,10 +378,9 @@ void TVMFFIABIBuilder::BindDLTensors(
     std::string arg_name = func_name + "." + buffer->data->name_hint;
 
     Var is_null_var(arg_name + "_is_null", DataType::Bool());
-    init_nest_.emplace_back(
-        SeqStmt({tirx::Bind(is_null_var, Call(DataType::Bool(),
-                                              builtin::isnullptr(), {handle})),
-                 nop}));
+    init_nest_.emplace_back(tirx::Bind(
+        is_null_var,
+        Call(DataType::Bool(), builtin::isnullptr(), {handle})));
     const PrimExpr &is_null = is_used ? const_false() : is_null_var;
 
     is_null_map[arg_name] = is_null_var;
@@ -410,13 +409,12 @@ void TVMFFIABIBuilder::BindDLTensors(
     def_handle_dtype_.Set(buf_shape->data, make_const(tvm_shape_type, 0));
     // Use if_then_else for NULL guard on the shape pointer itself, avoiding
     // dereferencing TVMStructGet(handle, kDLTensorShape) when handle is NULL.
-    init_nest_.emplace_back(SeqStmt(
-        {tirx::Bind(buf_shape->data,
-                    tvm::if_then_else(Not(is_null),
-                                      TVMArrayGet(DataType::Handle(), handle,
-                                                  builtin::kDLTensorShape),
-                                      make_zero(DataType::Handle()))),
-         nop}));
+    init_nest_.emplace_back(tirx::Bind(
+        buf_shape->data,
+        tvm::if_then_else(Not(is_null),
+                          TVMArrayGet(DataType::Handle(), handle,
+                                      builtin::kDLTensorShape),
+                          make_zero(DataType::Handle()))));
     init_nest_.emplace_back(DeclBuffer(buf_shape));
 
     // Save for later use in shape binding
@@ -758,8 +756,7 @@ void TVMFFIABIBuilder::BindDLTensors(
               Var v_arg = GetRef<Var>(v);
               defs_.emplace_back(v_arg);
               (*def_map_)[v] = cascaded_value;
-              init_nest_.emplace_back(
-                  SeqStmt({tirx::Bind(v_arg, cascaded_value), Evaluate(0)}));
+              init_nest_.emplace_back(tirx::Bind(v_arg, cascaded_value));
             } else {
               // Single source or no special handling needed, use nullable
               // binding. When the only source is NULL, bind m to 0 safely.
@@ -797,14 +794,13 @@ void TVMFFIABIBuilder::BindDLTensors(
                         tvm_shape_type, arg_name + ".strides");
         def_handle_dtype_.Set(buf_strides->data,
                               tirx::TypeAnnotation(tvm_shape_type));
-        init_nest_.emplace_back(
-            SeqStmt({tirx::Bind(buf_strides->data,
-                                tvm::if_then_else(
-                                    Not(is_null),
-                                    TVMArrayGet(DataType::Handle(), handle,
-                                                builtin::kDLTensorStrides),
-                                    make_zero(DataType::Handle()))),
-                     nop}));
+        init_nest_.emplace_back(tirx::Bind(
+            buf_strides->data,
+            tvm::if_then_else(
+                Not(is_null),
+                TVMArrayGet(DataType::Handle(), handle,
+                            builtin::kDLTensorStrides),
+                make_zero(DataType::Handle()))));
         init_nest_.emplace_back(DeclBuffer(buf_strides));
         PrimExpr v_strides_is_null =
             Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});
@@ -845,13 +841,12 @@ void TVMFFIABIBuilder::BindDLTensors(
                       tvm_shape_type, arg_name + ".strides");
       def_handle_dtype_.Set(buf_strides->data,
                             tirx::TypeAnnotation(tvm_shape_type));
-      init_nest_.emplace_back(SeqStmt(
-          {tirx::Bind(buf_strides->data,
-                      tvm::if_then_else(Not(is_null),
-                                        TVMArrayGet(DataType::Handle(), handle,
-                                                    builtin::kDLTensorStrides),
-                                        make_zero(DataType::Handle()))),
-           nop}));
+      init_nest_.emplace_back(tirx::Bind(
+          buf_strides->data,
+          tvm::if_then_else(Not(is_null),
+                            TVMArrayGet(DataType::Handle(), handle,
+                                        builtin::kDLTensorStrides),
+                            make_zero(DataType::Handle()))));
       init_nest_.emplace_back(DeclBuffer(buf_strides));
       PrimExpr v_strides_is_null =
           Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});
@@ -1036,10 +1031,15 @@ void TVMFFIABIBuilder::BindDLTensors(
           AssertStmt(data_ptr_ok, StringImm("RuntimeError"),
                      Array<StringImm>({StringImm(data_msg.str())})));
 
-      // mark alignment of external bufs
-      init_nest_.emplace_back(
-          AttrStmt(vptr, tirx::attr::storage_alignment,
-                   IntImm(DataType::Int(32), buffer->data_alignment), nop));
+      // Only LLVM consumes this scoped host-side alignment metadata. Device
+      // functions retain the buffer alignment established before host/device
+      // splitting; wrapping a C host launcher once per argument creates a
+      // linear-depth IR nest without benefiting its code generator.
+      if (emit_storage_alignment) {
+        init_nest_.emplace_back(
+            AttrStmt(vptr, tirx::attr::storage_alignment,
+                     IntImm(DataType::Int(32), buffer->data_alignment), nop));
+      }
 
       def_handle_dtype_.Set(vptr, tirx::TypeAnnotation(buffer->dtype));
     }
