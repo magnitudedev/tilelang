@@ -15,6 +15,9 @@ from tvm.target import Target
 class KernelTiming:
     name: str
     elapsed_ns: int
+    started_ns: int
+    ended_ns: int
+    dispatch: int
 
 
 class KernelCapture:
@@ -37,7 +40,9 @@ class KernelCapture:
 
     def finish(self) -> tuple[KernelTiming, ...]:
         values = self._require()["finish"]()
-        return tuple(KernelTiming(str(value["name"]), int(value["elapsed_ns"])) for value in values)
+        return tuple(KernelTiming(str(value["name"]), int(value["elapsed_ns"]),
+                                  int(value["started_ns"]), int(value["ended_ns"]),
+                                  int(value["dispatch"])) for value in values)
 
     def close(self) -> None:
         if get_ident() != self._owner:
@@ -66,4 +71,4 @@ def kernel_capture(target: Target, *, ordinal: int = 0, max_kernels: int = 1024)
     if factory is None:
         return None
     module = factory(ordinal, max_kernels)
-    return None if module is None else KernelCapture(module, "metal-stage-timestamps-calibrated-v1")
+    return None if module is None else KernelCapture(module, "metal-stage-timestamps-capture-relative-v2")

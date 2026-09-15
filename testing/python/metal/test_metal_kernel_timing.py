@@ -64,7 +64,11 @@ def test_native_compute_timestamps_on_bound_multi_dispatch_entrypoint(bound):
         timings = with_capture.finish()
         assert len(timings) == 2
         assert all(item.name and item.elapsed_ns > 0 for item in timings)
-        assert with_capture.clock == "metal-stage-timestamps-calibrated-v1"
+        assert [item.dispatch for item in timings] == [0, 1]
+        assert all(0 <= item.started_ns < item.ended_ns for item in timings)
+        # Endpoints and elapsed use the same calibrated, capture-relative clock.
+        assert all(abs(item.ended_ns - item.started_ns - item.elapsed_ns) <= 1 for item in timings)
+        assert with_capture.clock == "metal-stage-timestamps-capture-relative-v2"
         torch.testing.assert_close(output.cpu(), (torch.arange(256, dtype=torch.float32) + 1) * 3)
     finally:
         with_capture.close()
