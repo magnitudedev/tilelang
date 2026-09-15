@@ -1948,9 +1948,11 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
 
   ffi::Map<ffi::String, ffi::String> source;
   source.Set("metal", source_maker.str());
+  const int metal_language_version =
+      target->GetAttr<Integer>("metal_language_version").value_or(Integer(23))->value;
   return tvm::target::MetalModuleCreateWithFallback(
       std::move(smap), ffi::String(fmt), ExtractFuncInfo(mod),
-      std::move(source));
+      std::move(source), metal_language_version);
 }
 
 ffi::Module BuildTileLangMetalWithoutCompile(IRModule mod, Target target) {
@@ -1986,9 +1988,11 @@ ffi::Module BuildTileLangMetalWithoutCompile(IRModule mod, Target target) {
 
   ffi::Map<ffi::String, ffi::String> source;
   source.Set("metal", source_maker.str());
+  const int metal_language_version =
+      target->GetAttr<Integer>("metal_language_version").value_or(Integer(23))->value;
   return tvm::target::MetalModuleCreateWithFallback(
       std::move(smap), ffi::String("metal"), ExtractFuncInfo(mod),
-      std::move(source));
+      std::move(source), metal_language_version);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

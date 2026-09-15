@@ -110,6 +110,43 @@ def test_webgpu_only_exposes_tvm_ffi_execution():
     assert backend.allowed_execution_backends(target) == ("tvm_ffi",)
 
 
+def test_metal_capabilities_follow_resolved_device_facts():
+    backend = get_backend("metal")
+    baseline = tvm.target.Target(
+        {
+            "kind": "metal",
+            "metal_language_version": 30,
+            "supports_bfloat16": False,
+            "supports_simdgroup_reduction": False,
+            "supports_simdgroup_matrix": False,
+        }
+    )
+    modern = tvm.target.Target(
+        {
+            "kind": "metal",
+            "metal_language_version": 31,
+            "thread_warp_size": 32,
+            "supports_bfloat16": True,
+            "supports_simdgroup_reduction": True,
+            "supports_simdgroup_matrix": True,
+        }
+    )
+
+    baseline_caps = backend.capabilities(baseline)
+    modern_caps = backend.capabilities(modern)
+
+    assert "bfloat16" not in baseline_caps.supported_dtypes
+    assert baseline_caps.matrix_instructions == ()
+    assert "subgroup_exchange" not in baseline_caps.features
+    assert "bfloat16" in modern_caps.supported_dtypes
+    assert {item.input_dtype for item in modern_caps.matrix_instructions} == {
+        "float16",
+        "float32",
+        "bfloat16",
+    }
+    assert "subgroup_exchange" in modern_caps.features
+
+
 def test_create_backend_context_binds_compile_state():
     context = create_backend_context("cuda", "c", "tvm_ffi")
 
@@ -121,3 +158,32 @@ def test_create_backend_context_binds_compile_state():
 
     with pytest.raises(AttributeError):
         context.target = tvm.target.Target("llvm")
+
+
+def test_cuda_capabilities_respect_architecture():
+    backend = get_backend("cuda")
+    old = backend.capabilities(tvm.target.Target({"kind": "cuda", "arch": "sm_75"}))
+    modern = backend.capabilities(tvm.target.Target({"kind": "cuda", "arch": "sm_80"}))
+    assert not old.supports("async_copy")
+    assert "bfloat16" not in old.supported_dtypes
+    assert {item.input_dtype for item in old.matrix_instructions} == {"float16"}
+    assert modern.supports("async_copy")
+    assert "bfloat16" in modern.supported_dtypes
+
+
+def test_webgpu_does_not_claim_unsupported_dtypes():
+    caps = get_backend("webgpu").capabilities(tvm.target.Target("webgpu"))
+    assert not {"bfloat16", "int64"} & caps.supported_dtypes
+
+
+def test_metal_rejects_inconsistent_simd_geometry():
+    with pytest.raises(ValueError, match="thread_warp_size=32"):
+        get_backend("metal").capabilities(
+            tvm.target.Target(
+                {
+                    "kind": "metal",
+                    "thread_warp_size": 16,
+                    "supports_simdgroup_matrix": True,
+                }
+            )
+        )

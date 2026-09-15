@@ -12,6 +12,7 @@ from . import codegen, execution_backend, pipeline
 def _capabilities(target):
     return target_limits(target, subgroup_width=1)
 
+
 BACKEND = register_backend(
     BackendModule(
         name="cpu",

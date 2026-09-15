@@ -22,12 +22,16 @@ int TargetMetalGetWarpSize(Target target) {
 }
 
 bool TargetMetalSupportsMetal4(Target target) {
-  for (const auto &key : target->keys) {
-    if (key == "metal4") {
-      return true;
-    }
-  }
-  return false;
+  return target->GetAttr<Bool>("supports_metal4").value_or(Bool(false));
+}
+
+bool TargetMetalSupportsSIMDGroupMatrix(Target target) {
+  return target->GetAttr<Bool>("supports_simdgroup_matrix")
+      .value_or(Bool(false));
+}
+
+bool TargetMetalSupportsBFloat16(Target target) {
+  return target->GetAttr<Bool>("supports_bfloat16").value_or(Bool(false));
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
@@ -38,7 +42,11 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.TargetMetalGetWarpSize",
            [](Target target) { return TargetMetalGetWarpSize(target); })
       .def("tl.TargetMetalSupportsMetal4",
-           [](Target target) { return TargetMetalSupportsMetal4(target); });
+           [](Target target) { return TargetMetalSupportsMetal4(target); })
+      .def("tl.TargetMetalSupportsSIMDGroupMatrix",
+           [](Target target) { return TargetMetalSupportsSIMDGroupMatrix(target); })
+      .def("tl.TargetMetalSupportsBFloat16",
+           [](Target target) { return TargetMetalSupportsBFloat16(target); });
 }
 
 } // namespace tl

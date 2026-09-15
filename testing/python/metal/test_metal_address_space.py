@@ -44,7 +44,16 @@ def shared_alias_gemm():
 
 
 def lower_to_metal(enable_device_compile: bool) -> str:
-    target = tvm.target.Target("metal", tvm.target.Target("llvm"))
+    target = tvm.target.Target(
+        {
+            "kind": "metal",
+            "thread_warp_size": 32,
+            "metal_language_version": 31,
+            "supports_bfloat16": True,
+            "supports_simdgroup_matrix": True,
+        },
+        tvm.target.Target("llvm"),
+    )
     with target:
         artifact = tilelang.lower(
             shared_alias_gemm(),

@@ -13,14 +13,19 @@ from . import codegen, execution_backend, pipeline
 
 
 def _capabilities(target):
+    from tilelang.backend.capabilities import DEFAULT_DTYPES
+    from tilelang.rocm.target import target_is_cdna, target_is_rdna
+
+    arch = str(target.attrs.get("mcpu", "")).split(":")[0]
+    # gfx900/gfx906 have no MFMA; CDNA and RDNA3+ have matrix lowering.
+    matrix = (target_is_cdna(target) and (arch in {"gfx908", "gfx90a"} or arch.startswith(("gfx94", "gfx95")))) or target_is_rdna(target)
+    instructions = tuple(MatrixInstruction(16, 16, 16, dtype, "float32") for dtype in ("float16", "bfloat16")) if matrix else ()
     return target_limits(
         target,
         subgroup_width=target_get_warp_size(target),
-        matrix_instructions=(
-            MatrixInstruction(16, 16, 16, "float16", "float32"),
-            MatrixInstruction(16, 16, 16, "bfloat16", "float32"),
-        ),
+        matrix_instructions=instructions,
         features=frozenset({"subgroup_exchange", "atomic.add.float32", "atomic.add.int32"}),
+        supported_dtypes=DEFAULT_DTYPES if matrix else DEFAULT_DTYPES - {"bfloat16"},
     )
 
 

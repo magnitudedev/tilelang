@@ -13,8 +13,24 @@ import tilelang.testing
 import tilelang.language as T
 from tilelang.metal.intrinsics.metal_macro_generator import MPSIntrinEmitter
 
-METAL_TARGET = tvm.target.Target({"kind": "metal", "keys": ["metal", "gpu"]})
-METAL4_TARGET = tvm.target.Target({"kind": "metal", "keys": ["metal", "gpu", "metal4"]})
+METAL_TARGET = tvm.target.Target(
+    {
+        "kind": "metal",
+        "keys": ["metal", "gpu"],
+        "thread_warp_size": 32,
+        "metal_language_version": 31,
+        "supports_simdgroup_matrix": True,
+        "supports_bfloat16": True,
+    }
+)
+METAL4_TARGET = tvm.target.Target(
+    {
+        **dict(METAL_TARGET.export()),
+        "keys": ["metal", "gpu", "metal4"],
+        "metal_language_version": 40,
+        "supports_metal4": True,
+    }
+)
 
 
 def matmul_gemm_v2(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):

@@ -104,9 +104,7 @@ def target_limits(
     attrs = target.attrs
     return BackendCapabilities(
         subgroup_width=int(attrs.get("thread_warp_size", subgroup_width)),
-        max_threads_per_group=int(
-            attrs.get("max_threads_per_block", attrs.get("max_num_threads", 1))
-        ),
+        max_threads_per_group=int(attrs.get("max_threads_per_block", attrs.get("max_num_threads", 1))),
         shared_memory_bytes=int(attrs.get("max_shared_memory_per_block", 0)),
         supported_dtypes=supported_dtypes,
         matrix_instructions=matrix_instructions,

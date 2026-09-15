@@ -122,6 +122,14 @@ bool CanUseCooperativeTensor(const GemmWarpPolicyNode &policy, int M, int N,
 struct Gemm {
   static String SelectInst(const GemmNode &op, int block_size, Target target) {
     (void)block_size;
+    TVM_FFI_ICHECK(TargetMetalSupportsSIMDGroupMatrix(target))
+        << "Metal SIMD-group matrix operations are unavailable on target "
+        << target->str();
+    if (op.a_->dtype.is_bfloat16() || op.b_->dtype.is_bfloat16()) {
+      TVM_FFI_ICHECK(TargetMetalSupportsBFloat16(target))
+          << "Metal bfloat16 matrix operations require MSL 3.1 and a "
+             "bfloat-capable GPU";
+    }
     if (op.isWgmma_ || op.isTcgen05_) {
       LOG(FATAL) << "Explicit CUDA GEMM instructions are not available for "
                     "Metal target "

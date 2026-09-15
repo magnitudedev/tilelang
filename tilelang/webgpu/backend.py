@@ -11,7 +11,8 @@ from . import codegen, pipeline
 
 
 def _capabilities(target):
-    return target_limits(target, subgroup_width=1)
+    return target_limits(target, subgroup_width=1, supported_dtypes=frozenset({"bool", "int32", "uint32", "float32"}))
+
 
 BACKEND = register_backend(
     BackendModule(

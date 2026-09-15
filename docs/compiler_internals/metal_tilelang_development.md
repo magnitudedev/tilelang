@@ -19,6 +19,26 @@ How to read this document:
 - To find performance data, implementation files, or test commands, go to
   Section 5.
 
+## Target detection and explicit targets
+
+A bare `target="metal"` detects the local device through TVM's
+`Target.from_device("metal")`. TVM owns the native feature queries, threadgroup
+limits, and shader-language support. TileLang adds its Metal 4 dispatch key when
+that device supports Metal 4. Without a local Metal device, the bare name produces
+an offline target with TVM's defaults.
+
+A `Target` object or target dictionary is an explicit compilation environment.
+TileLang preserves its features, limits, language version, and host target; it does
+not fill it from the machine doing compilation. To customize the local device,
+export `Target.from_device("metal")`, apply the desired overrides, and supply that
+configuration. Resolving a target again leaves it unchanged. No internal
+normalization marker is serialized into target attributes.
+
+The selected shader-language version remains part of the compiled Metal module,
+including its serialized form. The runtime compiles using that version and rejects
+an unsupported version. Detection does not change the global Metal warp-size
+default; the detected device supplies its own width.
+
 ## 0. TL;DR
 
 - The current default fast path is **direct-global cooperative tensor**: A/B are
