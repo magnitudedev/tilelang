@@ -258,3 +258,23 @@ def test_launch_plan_is_plain_data():
 
 if __name__ == "__main__":
     tilelang.testing.main()
+
+
+def test_launch_plan_rejects_additional_pointer_offsets():
+    from tilelang.jit.adapter.torch.metal import _packed_slot
+    from tvm import tirx
+
+    args = tirx.Var("args", "handle")
+    handle = tirx.call_intrin("handle", "tirx.tvm_struct_get", args, 0, 15)
+    data = tirx.call_intrin("handle", "tirx.tvm_struct_get", handle, 0, 1)
+    offset = tirx.call_intrin("handle", "tirx.handle_add_byte_offset", data, 16)
+    assert _packed_slot(offset, {}, args) is None
+
+
+def test_launch_plan_rejects_unrepresented_host_effects():
+    from tilelang.jit.adapter.torch.metal import _collect_call_sites, MetalLaunchPlanError
+    from tvm import tirx
+
+    body = tirx.Evaluate(tirx.call_extern("int32", "side_effect"))
+    with pytest.raises(MetalLaunchPlanError, match="host effects"):
+        _collect_call_sites(body, {}, [])

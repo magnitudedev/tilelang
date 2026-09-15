@@ -35,6 +35,8 @@ _STRUCT_GET = "tirx.tvm_struct_get"
 _ADD_BYTE_OFFSET = "tirx.handle_add_byte_offset"
 _FFI_VALUE_FIELD = 15
 _DATA_FIELD = 1
+_BYTE_OFFSET_FIELD = 8
+_FFI_TENSOR_HEADER_BYTES = 24
 _DYN_SHARED_TAG = "tirx.use_dyn_shared_memory"
 _LAUNCH_AXES = {
     "blockIdx.x": ("grid", 0),
@@ -141,30 +143,66 @@ def _packed_slot(expr: Any, bindings: dict[Any, Any], args_var: tirx.Var, depth:
             return _packed_slot(source, bindings, args_var, depth + 1)
         return None
     if _is_call_to(expr, _ADD_BYTE_OFFSET) and len(expr.args) == 2:
-        return _packed_slot(expr.args[0], bindings, args_var, depth + 1)
+        offset = expr.args[1]
+        # torch already applies the public tensor's own DLTensor byte offset.
+        # Any additional offset would require a different tensor view.
+        if isinstance(offset, tirx.IntImm) and int(offset) == 0:
+            return _packed_slot(expr.args[0], bindings, args_var, depth + 1)
+        base = expr.args[0]
+        if (
+            isinstance(offset, tirx.IntImm)
+            and int(offset) == _FFI_TENSOR_HEADER_BYTES
+            and _is_call_to(base, _STRUCT_GET)
+            and len(base.args) == 3
+            and isinstance(base.args[0], tirx.Var)
+            and base.args[0].same_as(args_var)
+            and isinstance(base.args[2], tirx.IntImm)
+            and int(base.args[2]) == _FFI_VALUE_FIELD
+        ):
+            return _packed_slot(base, bindings, args_var, depth + 1)
+        if (
+            _is_call_to(offset, _STRUCT_GET)
+            and len(offset.args) == 3
+            and isinstance(offset.args[2], tirx.IntImm)
+            and int(offset.args[2]) == _BYTE_OFFSET_FIELD
+        ):
+            source = offset.args[0]
+            if _packed_slot(source, bindings, args_var, depth + 1) == _packed_slot(expr.args[0], bindings, args_var, depth + 1):
+                return _packed_slot(expr.args[0], bindings, args_var, depth + 1)
+        return None
     return None
 
 
-def _collect_call_sites(stmt: Any, bindings: dict[Any, Any], sites: list[tuple[str, list[Any], dict[Any, Any]]]) -> None:
+def _collect_call_sites(stmt: Any, bindings: dict[Any, Any], sites: list[tuple[str, list[Any], dict[Any, Any]]]) -> bool:
     """Record packed calls in program order; reject host control flow."""
     if isinstance(stmt, tirx.SeqStmt):
+        terminated = False
         for item in stmt.seq:
-            _collect_call_sites(item, bindings, sites)
+            if terminated:
+                raise MetalLaunchPlanError("host statements after return are not supported by the torch Metal adapter")
+            terminated = _collect_call_sites(item, bindings, sites)
+        return terminated
     elif isinstance(stmt, tirx.AttrStmt):
-        _collect_call_sites(stmt.body, bindings, sites)
+        return _collect_call_sites(stmt.body, bindings, sites)
     elif isinstance(stmt, tirx.Bind):
         bindings[stmt.var] = stmt.value
     elif isinstance(stmt, tirx.Evaluate):
         call = stmt.value
         if _is_call_to(call, _CALL_PACKED) and call.args and isinstance(call.args[0], tirx.StringImm):
             sites.append((call.args[0].value, list(call.args[1:]), dict(bindings)))
+        elif _is_call_to(call, "tirx.ret") and len(call.args) == 1 and isinstance(call.args[0], tirx.IntImm) and int(call.args[0]) == 0:
+            return True
+        elif not isinstance(call, tirx.IntImm):
+            raise MetalLaunchPlanError("host effects are not supported by the torch Metal adapter")
     elif isinstance(stmt, (tirx.AssertStmt, tirx.DeclBuffer)):
-        return
+        return False
     else:
         raise MetalLaunchPlanError(
             f"host statement {type(stmt).__name__} is not supported by the torch Metal adapter; "
             "kernel launches must form a straight-line host program"
         )
+
+    return False
 
 
 def _host_entry(host_mod: tvm.IRModule) -> tirx.PrimFunc:
@@ -196,7 +234,11 @@ def plan_metal_launches(
     for symbol, call_args, bindings in sites:
         func = device_functions.get(symbol)
         if func is None:
-            continue
+            # The adapter owns the MPS device. This generated ABI call only
+            # selects that same device; arbitrary callbacks remain unsupported.
+            if symbol == "__tvm_set_device" and len(call_args) == 2 and isinstance(call_args[0], tirx.IntImm) and int(call_args[0]) == 8:
+                continue
+            raise MetalLaunchPlanError(f"host callback {symbol!r} is not supported by the torch Metal adapter")
         count = len(func.params)
         if len(call_args) < count:
             raise MetalLaunchPlanError(f"call site of '{symbol}' passes {len(call_args)} arguments for {count} device parameters")
