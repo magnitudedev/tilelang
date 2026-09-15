@@ -126,11 +126,7 @@ class Gemm(Node, Scriptable):
         impl_class = self._get_implementation_class(gemm_inst, target)
         if not arith.Analyzer().can_prove_equal(self.valid_m, self.m) and not impl_class.supports_runtime_valid_m:
             raise NotImplementedError(f"{impl_class.__name__} does not support T.gemm valid_m")
-        implementation = impl_class(self)
-        result = implementation.lower(layout_map, target, thread_bounds, thread_index, mbar_phase_expr)
-        from tilelang.analysis.gemm import record_gemm_plan
-        record_gemm_plan(implementation, target, thread_nums)
-        return result
+        return impl_class(self).lower(layout_map, target, thread_bounds, thread_index, mbar_phase_expr)
 
     def _select_gemm_instruction(self, thread_nums: int, target: Target) -> str:
         """Select the appropriate GEMM instruction key based on target and thread configuration.

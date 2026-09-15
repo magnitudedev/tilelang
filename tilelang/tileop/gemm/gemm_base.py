@@ -38,10 +38,6 @@ class GemmBase:
         # TODO(wt): Consider enabling mixed f8f6f4 operands for MMA paths too.
         return False
 
-    def gemm_plan(self, target: Target, thread_nums: int):
-        """Return the implementation's matrix plan, when it exposes one."""
-        return None
-
     def infer_layout(self, target: Target, thread_nums: int):
         raise NotImplementedError("infer_layout is not implemented")
 
