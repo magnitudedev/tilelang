@@ -100,9 +100,7 @@ class BaseKernelAdapter(ABC):
         return self.func(*args, **kwds)
 
     def bind(self, static: dict[int, Any], dynamic_indices: tuple[int, ...]) -> Callable[..., Any]:
-        raise NotImplementedError(
-            f"execution backend {type(self).__name__} does not provide native argument binding"
-        )
+        raise NotImplementedError(f"execution backend {type(self).__name__} does not provide native argument binding")
 
     def get_kernel_source(self, kernel_only: bool = True) -> str:
         if kernel_only:

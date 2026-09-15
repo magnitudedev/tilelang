@@ -1,6 +1,7 @@
 """The compiler for TL programs."""
 
 from __future__ import annotations
+from tilelang.utils.language import retrieve_func_from_module
 
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -62,6 +63,29 @@ def extrac_params(func: tirx.PrimFunc) -> list[KernelParam]:
     return tensor_types
 
 
+def _bind_private_host_launchers(mod: tvm.IRModule, target: Target) -> tvm.IRModule:
+    """Bind programmatic private schedule launchers to the full target.
+
+    A private function called by the public host entry normally classifies as a
+    host-only subroutine.  Programmatic schedule functions are different: they
+    are host launchers containing target-neutral device regions, so they need
+    the same device-plus-host target as the public entry before those regions
+    are split.
+    """
+    updates = {}
+    for global_var, base_func in mod.functions.items():
+        if not isinstance(base_func, tirx.PrimFunc) or base_func.attrs is None:
+            continue
+        if not base_func.attrs.get("tl.is_host_launcher"):
+            continue
+        launcher = base_func.with_attr("target", target)
+        updates[global_var] = launcher
+    if updates:
+        mod = tvm.IRModule(dict(mod.functions), attrs=mod.attrs)
+        mod.update(tvm.IRModule(updates))
+    return mod
+
+
 def host_codegen(
     host_mod: tvm.IRModule,
     context: BackendContext,
@@ -118,10 +142,9 @@ def lower_to_host_device_ir(
         attach_instruments = nullcontext() if has_session else instrument_current_pass_context()
         with attach_instruments:
             mod = func_or_mod
-            params = None
+            params = None if runtime_only else extrac_params(retrieve_func_from_module(func_or_mod))
             if isinstance(func_or_mod, tirx.PrimFunc):
                 func = func_or_mod
-                params = extrac_params(func) if not runtime_only else None
                 mod = tvm.IRModule({func.attrs["global_symbol"]: func})
 
             target = context.target
@@ -133,6 +156,7 @@ def lower_to_host_device_ir(
             # Run backend-independent semantic checks before target-specific lowering.
             PreLowerSemanticCheck(mod)
 
+            mod = _bind_private_host_launchers(mod, target)
             mod = context.lower(mod)
 
             host_mod = tirx.transform.Filter(_is_host_call)(mod)

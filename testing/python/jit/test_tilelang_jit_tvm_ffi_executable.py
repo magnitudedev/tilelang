@@ -130,7 +130,10 @@ def test_exporting_disk_cached_library_to_its_own_path_succeeds(tmp_path):
     assert cached_library.read_bytes() == b"cached-library"
 
 
-def test_callee_allocated_output_dispatch_uses_single_main_entry():
+def test_callee_allocated_output_dispatch_uses_single_main_entry(monkeypatch):
+    # This tests argument routing through a fake executable, not CUDA execution.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.Tensor, "__dlpack_c_exchange_api__", lambda self: None, raising=False)
     adapter, _ = _make_adapter()
     adapter.params = [_FakeKernelParam(), _FakeKernelParam()]
     adapter.result_idx = [1]

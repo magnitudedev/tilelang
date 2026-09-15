@@ -22,6 +22,7 @@ from collections.abc import Iterable
 from tilelang import tvm as tvm
 from tilelang.language.eager import PrimFunc, prim_func, JITFunc
 from tvm.target import Target
+from tvm import IRModule
 
 from tilelang.jit.kernel import JITKernel
 from tilelang.cache import cached
@@ -90,7 +91,7 @@ class _CallFormCache:
 
 
 def compile(
-    func: PrimFunc[_KP, _T] = None,
+    func: PrimFunc[_KP, _T] | IRModule = None,
     out_idx: list[int] | int | None = None,
     execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
     target: TargetLike | None = None,
@@ -100,12 +101,13 @@ def compile(
     compile_flags: list[str] | str | None = None,
 ) -> JITKernel[_KP, _T]:
     """
-    Compile the given TileLang PrimFunc with TVM and build a JITKernel.
+    Compile the given TileLang PrimFunc or single-entry IRModule and build a JITKernel.
 
     Parameters
     ----------
-    func : tvm.tirx.PrimFunc, optional
-        The TileLang TIR function to compile and wrap.
+    func : tvm.tirx.PrimFunc or tvm.IRModule, optional
+        The TileLang TIR program to compile and wrap. Modules must contain
+        exactly one externally exposed PrimFunc.
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).
     execution_backend : Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
@@ -135,10 +137,11 @@ def compile(
         Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
     """
 
-    assert isinstance(func, PrimFunc), f"target function must be a PrimFunc but got {type(func)}"
+    assert isinstance(func, (PrimFunc, IRModule)), f"target program must be a PrimFunc or IRModule but got {type(func)}"
 
-    # Merge function-level attrs from PrimFunc
-    func_attrs = func.attrs
+    from tilelang.utils.language import retrieve_func_from_module
+
+    func_attrs = retrieve_func_from_module(func).attrs
     if func_attrs and "tilelang_out_idx" in func_attrs:
         func_out_idx = list(func_attrs["tilelang_out_idx"])
         if out_idx is not None:

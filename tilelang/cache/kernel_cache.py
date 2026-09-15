@@ -19,6 +19,7 @@ from collections.abc import Callable
 
 from tvm.target import Target
 from tvm.tirx import PrimFunc
+from tvm import IRModule
 from tvm.runtime import Executable
 from tilelang.backend.module import BackendContext, create_backend_context
 from tilelang.engine.param import KernelParam, dump_kernel_params, load_kernel_params
@@ -283,9 +284,17 @@ class KernelCache:
         # Use SHA256 to generate hash key
         return sha256(key_string.encode()).hexdigest()
 
+    @staticmethod
+    def _program_name(func: PrimFunc | IRModule | None, default: str) -> str:
+        if func is None:
+            return default
+        from tilelang.utils.language import retrieve_func_from_module
+
+        return get_prim_func_name(retrieve_func_from_module(func), default) or default
+
     def cached(
         self,
-        func: PrimFunc = None,
+        func: PrimFunc | IRModule = None,
         out_idx: list[int] = None,
         *args,
         target: str | Target | None = None,
@@ -303,7 +312,7 @@ class KernelCache:
         and execution backend resolution should happen. All compilation paths go through here.
 
         Args:
-            func: Function to be compiled or a prepared PrimFunc
+            func: Prepared PrimFunc or single-entry IRModule to compile
             out_idx: Indices specifying which outputs to return
             target: Compilation target platform (None = read from TILELANG_DEFAULT_TARGET env var).
                 Use a dict for target attributes, for example {"kind": "cuda", "arch": "sm_90"}.
@@ -370,12 +379,12 @@ class KernelCache:
             compile_flags=compile_flags,
         )
         if verbose:
-            self.logger.info(f"Generated cache key: {key} for kernel {get_prim_func_name(func, '<unknown>')}")
+            self.logger.info(f"Generated cache key: {key} for kernel {self._program_name(func, '<unknown>')}")
         with self._lock:
             # First check in-memory cache
             if key in self._memory_cache:
                 # Include kernel name for easier debugging when hitting memory cache
-                kernel_name = get_prim_func_name(func, "<unknown>")
+                kernel_name = self._program_name(func, "<unknown>")
                 self.logger.warning(
                     "Found kernel '%s' in memory cache. For better performance, consider using `@tilelang.jit` instead of direct kernel caching.",
                     kernel_name,
@@ -383,7 +392,7 @@ class KernelCache:
                 return self._memory_cache[key]
 
         if verbose:
-            self.logger.debug(f"Checking disk cache for kernel {get_prim_func_name(func, '<unknown>')}")
+            self.logger.debug(f"Checking disk cache for kernel {self._program_name(func, '<unknown>')}")
 
         # Disk loads can be expensive for large kernel sets; keep them outside
         # the global cache lock so independent cache hits can proceed in parallel.
@@ -398,7 +407,7 @@ class KernelCache:
         )
         if kernel is not None:
             if verbose:
-                self.logger.debug(f"Found kernel in disk cache for {get_prim_func_name(func, '<unknown>')}")
+                self.logger.debug(f"Found kernel in disk cache for {self._program_name(func, '<unknown>')}")
             with self._lock:
                 existing = self._memory_cache.get(key)
                 if existing is not None:
@@ -407,12 +416,12 @@ class KernelCache:
             return kernel
 
         if verbose:
-            self.logger.debug(f"No cached kernel for {get_prim_func_name(func, '<unknown>')}")
+            self.logger.debug(f"No cached kernel for {self._program_name(func, '<unknown>')}")
         # Compile kernel if cache miss; leave critical section
         with jit_phase(
             "cache.compile",
             verbose=verbose,
-            kernel=get_prim_func_name(func, "<unknown>"),
+            kernel=self._program_name(func, "<unknown>"),
             target=str(target),
             target_host=str(target_host) if target_host is not None else None,
             backend=execution_backend,

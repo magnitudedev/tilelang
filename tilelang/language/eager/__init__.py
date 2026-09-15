@@ -5,6 +5,7 @@ from .builder import (  # noqa: F401
     annotate_compile_flags,
     annotate_pass_configs,
     build_prim_func,
+    build_prim_module,
     const,
     macro,
     prim_func,
@@ -22,5 +23,6 @@ __all__ = (
     "annotate_compile_flags",
     "annotate_pass_configs",
     "build_prim_func",
+    "build_prim_module",
     *_dtypes_all,
 )

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from collections.abc import Mapping
 from contextlib import contextmanager, AbstractContextManager
 from dataclasses import dataclass
 import inspect
@@ -1186,6 +1187,8 @@ def build_prim_func(
         raise TypeError("PrimFunc body must be callable")
 
     declared = tuple(parameters)
+    if any(not isinstance(value, (Buffer, Var)) for _, value in declared):
+        raise TypeError("PrimFunc parameters must be Buffer or Var declarations")
     names = tuple(parameter_name for parameter_name, _ in declared)
     if any(not parameter_name or not parameter_name.isidentifier() for parameter_name in names):
         raise ValueError("PrimFunc parameter names must be valid Python identifiers")
@@ -1199,6 +1202,80 @@ def build_prim_func(
         if result is not None:
             raise TypeError("PrimFunc body must return None")
     return _patch_prim_func_attrs(builder.get(), builder)
+
+
+class _PrimFuncRef:
+    """A callable reference to a private PrimFunc while building a module entry."""
+
+    def __init__(self, global_var: tvm.ir.GlobalVar, program: tvm.tirx.PrimFunc):
+        self._global_var = global_var
+        self._program = program
+
+    def __call__(self, *arguments) -> None:
+        if len(arguments) != len(self._program.params):
+            raise TypeError(f"private function expects {len(self._program.params)} arguments, got {len(arguments)}")
+        values = []
+        for parameter, argument in zip(self._program.params, arguments):
+            if parameter in self._program.buffer_map:
+                if not isinstance(argument, Buffer):
+                    raise TypeError("private buffer parameter requires a Buffer")
+                expected = self._program.buffer_map[parameter]
+                if argument.dtype != expected.dtype:
+                    raise TypeError(f"private buffer expects {expected.dtype}, got {argument.dtype}")
+                values.append(argument.data)
+            else:
+                value = tvm.runtime.convert(unwrap_expr(argument))
+                if not isinstance(value, tvm.tirx.PrimExpr) or value.dtype != parameter.dtype:
+                    raise TypeError(f"private scalar parameter requires {parameter.dtype}")
+                values.append(value)
+        tirx.evaluate(tvm.tirx.Call("int32", self._global_var, values))
+
+
+def build_prim_module(
+    name: str,
+    parameters: Sequence[tuple[str, Buffer | Var]],
+    body: Callable[..., None],
+    private: Mapping[str, tvm.tirx.PrimFunc],
+) -> tvm.IRModule:
+    """Build one public entry that may repeatedly call private TileLang schedules.
+
+    Private definitions are lowered once each even when the entry calls their
+    corresponding private callable reference many times.  Calls are expressed in the
+    target-neutral TileLang language; backend lowering decides how to realize
+    the resulting native multi-launch program.
+
+    ``body`` receives a mapping from definition name to callable reference as
+    its first argument, followed by the entry parameters.
+    """
+    definitions = dict(private)
+    names = tuple(definitions)
+    if any(not isinstance(key, str) or not key.isidentifier() for key in names):
+        raise ValueError("private PrimFunc names must be valid identifiers")
+    if name in names:
+        raise ValueError("the public entry name cannot also name a private PrimFunc")
+
+    globals_by_name = {private_name: tvm.ir.GlobalVar(private_name) for private_name in names}
+    functions = {}
+    for private_name, program in definitions.items():
+        if not isinstance(program, tvm.tirx.PrimFunc):
+            raise TypeError("private programs must be PrimFuncs")
+        function = program.without_attr("global_symbol")
+        # This private function is a host-side schedule launcher: its body may
+        # contain one or more target-neutral T.Kernel regions.  BindTarget
+        # cannot infer that distinction from an ordinary host call, so retain
+        # it explicitly until the concrete target is available in lowering.
+        function = function.with_attr("tl.is_host_launcher", True)
+        functions[globals_by_name[private_name]] = function
+
+    references = {private_name: _PrimFuncRef(global_var, definitions[private_name]) for private_name, global_var in globals_by_name.items()}
+
+    def entry_body(*bound) -> None:
+        result = body(references, *bound)
+        if result is not None:
+            raise TypeError("PrimModule body must return None")
+
+    functions[name] = build_prim_func(name, parameters, entry_body)
+    return tvm.IRModule(functions)
 
 
 @dataclass

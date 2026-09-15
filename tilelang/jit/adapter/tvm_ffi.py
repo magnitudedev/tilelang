@@ -305,7 +305,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         return func
 
     def bind(self, static: dict[int, Any], dynamic_indices: tuple[int, ...]) -> Callable[..., Any]:
-        """Create a stable argument frame for a caller-allocated-output ABI."""
+        """Retain static arguments and bind a caller-allocated-output entrypoint."""
         if self.result_idx:
             raise ValueError("partial binding requires caller-allocated outputs")
         parameter_count = len(self.params)

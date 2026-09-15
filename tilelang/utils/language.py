@@ -167,26 +167,33 @@ def array_reduce(array: list[int]) -> int:
     return reduce(lambda x, y: x * y, array)
 
 
-def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
-    """
-    Retrieve the single PrimFunc from an IRModule.
+def retrieve_func_from_module(program: IRModule | PrimFunc) -> PrimFunc:
+    """Return the single public entry of a TileLang compilation unit."""
+    if isinstance(program, PrimFunc):
+        return program
+    if not isinstance(program, IRModule):
+        raise TypeError(f"expected PrimFunc or IRModule, got {type(program).__name__}")
+    entries = [
+        func
+        for func in program.functions.values()
+        if isinstance(func, PrimFunc) and func.attrs is not None and func.attrs.get("global_symbol") is not None
+    ]
+    if len(entries) != 1:
+        raise ValueError("a compiled IRModule must contain exactly one PrimFunc with a global_symbol")
+    return entries[0]
 
-    Args:
-        ir_module (IRModule): The TVM IRModule to extract the function from.
-            The module should contain exactly one global function.
 
-    Returns:
-        PrimFunc: The single function contained in the module.
-
-    Raises:
-        ValueError: If ir_module is not an IRModule.
-        AssertionError: If the module contains more than one global function.
-    """
-    if not isinstance(ir_module, IRModule):
-        raise ValueError("Not supported type: ", type(ir_module))
-    assert len(ir_module.get_global_vars()) == 1, "The optimized module should only have one global variable for default schedule."
-    func = list(ir_module.functions.values())[0]
-    return func
+def replace_entry_func(program: IRModule | PrimFunc, entry: PrimFunc) -> IRModule | PrimFunc:
+    """Replace the public entry without modifying the caller's module."""
+    previous = retrieve_func_from_module(program)
+    if isinstance(program, PrimFunc):
+        return entry
+    functions = dict(program.functions)
+    for global_var, function in functions.items():
+        if function.same_as(previous):
+            functions[global_var] = entry
+            break
+    return IRModule(functions, attrs=program.attrs)
 
 
 def to_buffer_region(obj: BufferLikeType, access_type: str = "rw", extents: list[PrimExpr] | None = None) -> PrimExpr | BufferRegion:
