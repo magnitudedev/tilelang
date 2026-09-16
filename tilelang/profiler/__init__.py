@@ -18,6 +18,18 @@ from tilelang.profiler.bench import do_bench
 from tvm import tirx
 
 
+def _synchronize_tensors(tensors):
+    """Wait for the devices actually used by a validation call."""
+    if isinstance(tensors, torch.Tensor):
+        tensors = [tensors]
+    devices = {tensor.device for tensor in (tensors or []) if isinstance(tensor, torch.Tensor)}
+    for device in devices:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elif device.type == "mps":
+            torch.mps.synchronize()
+
+
 @dataclass
 class Profiler:
     """A profiler class for benchmarking and validating kernel implementations.
@@ -120,9 +132,11 @@ class Profiler:
         """
         ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
-        torch.cuda.synchronize()
+        _synchronize_tensors(ins)
+        _synchronize_tensors(ref_outs)
         lib_outs = self.func(*ins)
-        torch.cuda.synchronize()
+        _synchronize_tensors(ins)
+        _synchronize_tensors(lib_outs)
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
@@ -178,9 +192,11 @@ class Profiler:
         """
         ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
-        torch.cuda.synchronize()
+        _synchronize_tensors(ins)
+        _synchronize_tensors(ref_outs)
         lib_outs = self.func(*ins)
-        torch.cuda.synchronize()
+        _synchronize_tensors(ins)
+        _synchronize_tensors(lib_outs)
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
