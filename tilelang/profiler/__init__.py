@@ -241,7 +241,7 @@ class Profiler:
         n_warmup: int = 0,
         n_repeat: int = 0,
         input_tensors: list[torch.Tensor] = None,
-        backend: Literal["event", "cupti", "cudagraph"] = "event",
+        backend: Literal["event", "cupti", "cudagraph", "wall"] = "event",
         quantiles: list[float] | None = None,
         return_mode: Literal["min", "max", "mean", "median"] = "mean",
         dynamic_symbolic_constraints: dict[str, int] | None = None,
@@ -256,7 +256,8 @@ class Profiler:
             rep: Number of repetitions for timing
             n_warmup: Number of warmup iterations
             n_repeat: Number of timing iterations
-            backend: Which profiling backend to use - "event", "cupti", or "cudagraph"
+            backend: "event", "cupti", "cudagraph", or "wall" (synchronized
+                host latency including submission, without cache flushing).
             input_tensors: Optional pre-generated input tensors
             dynamic_symbolic_constraints: Optional dict mapping dynamic symbolic variable
                 names to concrete int values. Use this when benchmarking kernels with
@@ -280,6 +281,11 @@ class Profiler:
             else:
                 ins = self._get_inputs()
             bench_func = partial(bench_target, *ins)
+            benchmark_device = device
+            if benchmark_device is None:
+                devices = {value.device for value in ins if isinstance(value, torch.Tensor)}
+                if len(devices) == 1:
+                    benchmark_device = next(iter(devices))
             return do_bench(
                 bench_func,
                 warmup=warmup,
@@ -289,11 +295,11 @@ class Profiler:
                 quantiles=quantiles,
                 backend=backend,
                 return_mode=return_mode,
-                device=device,
+                device=benchmark_device,
                 early_stop_baseline=early_stop_baseline,
             )
 
-        if device is None:
+        if device is None or (not isinstance(device, int) and torch.device(device).type != "cuda"):
             return run_bench()
         with torch.cuda.device(device):
             return run_bench()

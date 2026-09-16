@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import os
 import sys
 from typing import Literal
@@ -73,7 +74,7 @@ def do_bench(
     _n_repeat: int = 0,
     quantiles: list[float] | None = None,
     fast_flush: bool = True,
-    backend: Literal["event", "cupti", "cudagraph"] = "event",
+    backend: Literal["event", "cupti", "cudagraph", "wall"] = "event",
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
     device: int | torch.device | None = None,
     cache_size: int = 256,
@@ -95,7 +96,8 @@ def do_bench(
         _n_repeat: Manual override for benchmark iterations (default: 0 = auto)
         quantiles: Performance percentiles to compute (e.g., [0.5, 0.95])
         fast_flush: Use faster L2 cache flush with int32 vs int8 (default: True)
-        backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph" (default: "event")
+        backend: "event", "cupti", "cudagraph", or "wall" (synchronized
+            host latency including submission, without cache flushing).
         return_mode: Result aggregation method - "mean", "median", "min", or "max"
         device: Optional CUDA device to benchmark on. When provided, CUDA
             events, streams, cache buffers, and synchronizations are scoped to
@@ -106,6 +108,9 @@ def do_bench(
         Runtime in milliseconds (float) or list of quantile values if quantiles specified
     """
     assert return_mode in ["min", "max", "mean", "median"], f"Invalid return_mode: {return_mode}"
+
+    if backend == "wall":
+        return _bench_wall(fn, device, warmup, rep, _n_warmup, _n_repeat, quantiles, return_mode)
 
     device_idx = _normalize_cuda_device(device)
     if device_idx is not None:
@@ -139,6 +144,36 @@ def do_bench(
         cache_size=cache_size,
         early_stop_baseline=early_stop_baseline,
     )
+
+
+def _bench_wall(fn, device, warmup, rep, n_warmup, n_repeat, quantiles, return_mode):
+    """Synchronized host latency, including submission; no cache-flush policy."""
+    if isinstance(device, int):
+        device = torch.device("cuda", device)
+    module = torch.get_device_module(device)
+
+    def synchronize():
+        if device is not None and torch.device(device).type == "cuda":
+            module.synchronize(device)
+        else:
+            module.synchronize()
+
+    def sample():
+        synchronize()
+        started = time.perf_counter_ns()
+        fn()
+        synchronize()
+        return (time.perf_counter_ns() - started) / 1e6
+
+    estimate_ms = max(sample(), 1e-6)
+    for _ in range(n_warmup or max(1, int(warmup / estimate_ms))):
+        fn()
+    synchronize()
+    times = torch.tensor([sample() for _ in range(n_repeat or max(1, int(rep / estimate_ms)))], dtype=torch.float)
+    if quantiles is not None:
+        values = torch.quantile(times, torch.tensor(quantiles, dtype=torch.float)).tolist()
+        return values[0] if len(values) == 1 else values
+    return getattr(torch, return_mode)(times).item()
 
 
 def _normalize_cuda_device(benchmark_device: int | torch.device | None) -> int | None:
@@ -177,7 +212,7 @@ def _do_bench_impl(
     _n_repeat: int,
     quantiles: list[float] | None,
     fast_flush: bool,
-    backend: Literal["event", "cupti", "cudagraph"],
+    backend: Literal["event", "cupti", "cudagraph", "wall"],
     return_mode: Literal["min", "max", "mean", "median"],
     device_idx: int | None,
     cache_size: int,

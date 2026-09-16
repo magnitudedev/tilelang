@@ -222,7 +222,7 @@ class AutoTuner:
         skip_check: bool = False,
         manual_check_prog: Callable = None,
         cache_input_tensors: bool = False,
-        backend: Literal["event", "cupti", "cudagraph"] = "event",
+        backend: Literal["event", "cupti", "cudagraph", "wall"] = "event",
     ):
         """Set profiling arguments for the auto-tuner.
 
@@ -239,7 +239,8 @@ class AutoTuner:
             warmup: Number of warmup iterations.
             rep: Number of repetitions for timing.
             timeout: Maximum time per configuration.
-            backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph".
+            backend: "event", "cupti", "cudagraph", or "wall" (synchronized
+                host latency including submission, without cache flushing).
         Returns:
             AutoTuner: Self for method chaining.
         """
