@@ -157,6 +157,7 @@ template <typename T> T GetSymbol(void *handle, const char *name) {
 
 struct CUDARuntimeAPI {
   decltype(&::cudaGetErrorString) cudaGetErrorString_{nullptr};
+  decltype(&::cudaDriverGetVersion) cudaDriverGetVersion_{nullptr};
   decltype(&::cudaGetLastError) cudaGetLastError_{nullptr};
   decltype(&::cudaPeekAtLastError) cudaPeekAtLastError_{nullptr};
 
@@ -242,6 +243,7 @@ CUDARuntimeAPI CreateCUDARuntimeAPI() {
   api.cudaGetErrorString_ = GetSymbol<decltype(api.cudaGetErrorString_)>(
       handle, "cudaGetErrorString");
 
+  LOOKUP_REQUIRED(cudaDriverGetVersion)
   LOOKUP_REQUIRED(cudaGetLastError)
   LOOKUP_REQUIRED(cudaPeekAtLastError)
   LOOKUP_REQUIRED(cudaSetDevice)
@@ -327,6 +329,14 @@ TILELANG_CUDART_STUB_API const char *cudaGetErrorString(cudaError_t error) {
     return api->cudaGetErrorString_(error);
   }
   return FallbackCudaErrorString(error);
+}
+
+TILELANG_CUDART_STUB_API cudaError_t cudaDriverGetVersion(int *driverVersion) {
+  auto *api = GetCUDARuntimeAPI();
+  if (api->cudaDriverGetVersion_ == nullptr) {
+    return MissingLibraryError();
+  }
+  return api->cudaDriverGetVersion_(driverVersion);
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaGetLastError(void) {
