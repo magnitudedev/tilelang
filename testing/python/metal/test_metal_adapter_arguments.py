@@ -210,9 +210,16 @@ def test_pipeline_limits_are_exposed_and_enforced():
             i = T.get_thread_binding(0)
             B[i] = A[i]
 
-    # Pipeline creation itself rejects the declared threadgroup size on every
-    # Apple GPU; the adapter's own limit check covers pipelines that compile.
-    with pytest.raises((MetalLaunchPlanError, RuntimeError), match="threads per threadgroup"):
+    # An oversized threadgroup is always rejected, but where it is rejected depends
+    # on the GPU family. An M1 driver fails pipeline creation and names the limit
+    # ("Specified total max threads per threadgroup (2048) exceeds the maximum total
+    # threads per threadgroup supported (1024)", Domain=AGXMetalG13X), while the
+    # macos-latest CI runners fail earlier in the Metal compiler with a generic
+    # CompilerError "Compilation failed". Accept either: the contract under test is
+    # that the launch is refused, not how the vendor words it. A runner that could
+    # not compile at all would already have failed on affine(64) above.
+    # The adapter's own limit check covers pipelines that do compile.
+    with pytest.raises((MetalLaunchPlanError, RuntimeError), match="threads per threadgroup|Compilation failed"):
         compile_metal(oversized)
 
 
